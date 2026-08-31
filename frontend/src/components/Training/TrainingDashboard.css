@@ -1,0 +1,898 @@
+/* ============================================
+   TRAINING DASHBOARD - SAME LAYOUT AS DASHBOARD
+   ============================================ */
+
+/* ---------- CSS Variables ---------- */
+:root {
+  /* Colors */
+  --primary-50: #eff6ff;
+  --primary-100: #dbeafe;
+  --primary-200: #bfdbfe;
+  --primary-300: #93c5fd;
+  --primary-400: #60a5fa;
+  --primary-500: #3b82f6;
+  --primary-600: #2563eb;
+  --primary-700: #1d4ed8;
+  --primary-800: #1e40af;
+  --primary-900: #1e3a8a;
+
+  --accent-50: #fdf4ff;
+  --accent-100: #fae8ff;
+  --accent-200: #f5d0fe;
+  --accent-300: #f0abfc;
+  --accent-400: #e879f9;
+  --accent-500: #d946ef;
+  --accent-600: #c026d3;
+  --accent-700: #a21caf;
+  --accent-800: #86198f;
+  --accent-900: #701a75;
+
+  --success-500: #10b981;
+  --warning-500: #f59e0b;
+  --error-500: #ef4444;
+  --info-500: #3b82f6;
+
+  --slate-50: #f8fafc;
+  --slate-100: #f1f5f9;
+  --slate-200: #e2e8f0;
+  --slate-300: #cbd5e1;
+  --slate-400: #94a3b8;
+  --slate-500: #64748b;
+  --slate-600: #475569;
+  --slate-700: #334155;
+  --slate-800: #1e293b;
+  --slate-900: #0f172a;
+
+  /* Glass Effect - Same as Dashboard */
+  --glass-bg: rgba(255, 255, 255, 0.7);
+  --glass-border: rgba(255, 255, 255, 0.2);
+  --glass-shadow: rgba(0, 0, 0, 0.08);
+
+  /* Dark Mode - Same as Dashboard */
+  --dark-bg: rgba(15, 23, 42, 0.6);
+  --dark-border: rgba(51, 65, 85, 0.5);
+  --dark-text: #f1f5f9;
+  --dark-text-secondary: #94a3b8;
+
+  /* Spacing - Same as Dashboard */
+  --spacing-xs: 0.25rem;
+  --spacing-sm: 0.5rem;
+  --spacing-md: 1rem;
+  --spacing-lg: 1.5rem;
+  --spacing-xl: 2rem;
+  --spacing-2xl: 3rem;
+
+  /* Radius - Same as Dashboard */
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+  --radius-2xl: 1.25rem;
+  --radius-3xl: 1.5rem;
+
+  /* Transitions - Same as Dashboard */
+  --transition-fast: 0.15s ease;
+  --transition-normal: 0.25s ease;
+  --transition-slow: 0.4s ease;
+
+  /* Fonts */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+/* ---------- Dark Mode ---------- */
+.dark {
+  --glass-bg: rgba(30, 41, 59, 0.6);
+  --glass-border: rgba(51, 65, 85, 0.5);
+  --glass-shadow: rgba(0, 0, 0, 0.3);
+}
+
+/* ============================================
+   MAIN CONTAINER - SAME AS DASHBOARD
+   ============================================ */
+.training-dashboard {
+  padding: var(--spacing-lg);
+  max-width: 1440px;
+  margin: 0 auto;
+  font-family: var(--font-sans);
+  color: var(--slate-900);
+}
+
+.dark .training-dashboard {
+  color: var(--dark-text);
+}
+
+/* ============================================
+   HEADER - SAME AS DASHBOARD
+   ============================================ */
+.training-header {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--spacing-md);
+  margin-bottom: var(--spacing-lg);
+}
+
+@media (min-width: 640px) {
+  .training-header {
+    flex-direction: row;
+    align-items: center;
+  }
+}
+
+.training-header-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--slate-900);
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  margin: 0;
+}
+
+.dark .training-header-title {
+  color: var(--dark-text);
+}
+
+.training-header-title-icon {
+  color: var(--primary-500);
+}
+
+.training-header-subtitle {
+  font-size: 0.875rem;
+  color: var(--slate-500);
+  margin: var(--spacing-xs) 0 0 0;
+}
+
+.dark .training-header-subtitle {
+  color: var(--dark-text-secondary);
+}
+
+.training-header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
+}
+
+.training-header-btn {
+  padding: 0.5rem 1rem;
+  border-radius: var(--radius-xl);
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  color: var(--slate-600);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  font-family: var(--font-sans);
+}
+
+.dark .training-header-btn {
+  color: var(--dark-text-secondary);
+  background: rgba(30, 41, 59, 0.5);
+  border-color: var(--dark-border);
+}
+
+.training-header-btn:hover {
+  background: #ffffff;
+  border-color: var(--slate-300);
+}
+
+.dark .training-header-btn:hover {
+  background: var(--slate-800);
+  border-color: var(--slate-700);
+}
+
+.training-header-btn-icon {
+  width: 1rem;
+  height: 1rem;
+}
+
+.training-header-btn-primary {
+  background: linear-gradient(135deg, var(--primary-500), var(--accent-500));
+  color: #ffffff;
+  border: none;
+}
+
+.training-header-btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(59, 130, 246, 0.3);
+  background: #ffffff;
+  color: var(--slate-900);
+}
+
+.dark .training-header-btn-primary:hover {
+  background: var(--slate-800);
+  color: var(--dark-text);
+}
+
+.training-header-btn-icon-only {
+  padding: 0.5rem;
+}
+
+/* ============================================
+   STATS GRID - SAME AS DASHBOARD
+   ============================================ */
+.training-stats-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--spacing-md);
+  margin-bottom: var(--spacing-lg);
+}
+
+@media (min-width: 640px) {
+  .training-stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (min-width: 1024px) {
+  .training-stats-grid {
+    grid-template-columns: repeat(4, 1fr);
+  }
+}
+
+.training-stat-card {
+  background: var(--glass-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-2xl);
+  box-shadow: 0 8px 32px var(--glass-shadow);
+  padding: var(--spacing-lg);
+  text-align: center;
+  transition: all var(--transition-normal);
+}
+
+.training-stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.12);
+}
+
+.dark .training-stat-card:hover {
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.3);
+}
+
+.training-stat-label {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--slate-500);
+  margin: 0 0 var(--spacing-xs) 0;
+}
+
+.dark .training-stat-label {
+  color: var(--dark-text-secondary);
+}
+
+.training-stat-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--slate-900);
+  margin: 0;
+}
+
+.dark .training-stat-value {
+  color: var(--dark-text);
+}
+
+.training-stat-value-primary {
+  color: var(--primary-500);
+}
+
+.training-stat-value-success {
+  color: var(--success-500);
+}
+
+.training-stat-value-accent {
+  color: var(--accent-500);
+}
+
+/* ============================================
+   CHARTS SECTION - SAME AS DASHBOARD
+   ============================================ */
+.training-charts-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--spacing-lg);
+  margin-bottom: var(--spacing-lg);
+}
+
+@media (min-width: 1024px) {
+  .training-charts-grid {
+    grid-template-columns: 2fr 1fr;
+  }
+}
+
+.training-chart-card {
+  background: var(--glass-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-2xl);
+  box-shadow: 0 8px 32px var(--glass-shadow);
+  padding: var(--spacing-lg);
+}
+
+.training-chart-card-large {
+  min-height: 300px;
+}
+
+.training-chart-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--spacing-md);
+}
+
+.training-chart-title {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--slate-900);
+  margin: 0;
+}
+
+.dark .training-chart-title {
+  color: var(--dark-text);
+}
+
+.training-chart-subtitle {
+  font-size: 0.75rem;
+  color: var(--slate-400);
+  margin: 0;
+}
+
+.training-chart-wrapper {
+  height: 16rem;
+}
+
+@media (min-width: 768px) {
+  .training-chart-wrapper {
+    height: 18rem;
+  }
+}
+
+.training-chart-doughnut-wrapper {
+  height: 14rem;
+}
+
+/* ============================================
+   TRAINING LIST - SAME AS DASHBOARD CARD
+   ============================================ */
+.training-list-section {
+  margin-bottom: var(--spacing-lg);
+}
+
+.training-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--spacing-md);
+}
+
+.training-list-title {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--slate-900);
+  margin: 0;
+}
+
+.dark .training-list-title {
+  color: var(--dark-text);
+}
+
+.training-list-count {
+  font-size: 0.75rem;
+  color: var(--slate-500);
+}
+
+.dark .training-list-count {
+  color: var(--dark-text-secondary);
+}
+
+.training-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+/* ============================================
+   TRAINING CARD
+   ============================================ */
+.training-card {
+  background: var(--glass-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-2xl);
+  box-shadow: 0 8px 32px var(--glass-shadow);
+  padding: var(--spacing-md);
+  transition: all var(--transition-normal);
+}
+
+.training-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.12);
+}
+
+.dark .training-card:hover {
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.3);
+}
+
+.training-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.training-card-left {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+.training-card-icon-wrapper {
+  padding: 0.5rem;
+  border-radius: var(--radius-xl);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.training-card-icon-wrapper-running {
+  background: rgba(59, 130, 246, 0.1);
+  color: var(--primary-500);
+}
+
+.training-card-icon-wrapper-completed {
+  background: rgba(16, 185, 129, 0.1);
+  color: var(--success-500);
+}
+
+.training-card-icon-wrapper-failed {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--error-500);
+}
+
+.training-card-icon-wrapper-paused {
+  background: rgba(245, 158, 11, 0.1);
+  color: var(--warning-500);
+}
+
+.training-card-icon-wrapper-pending {
+  background: rgba(100, 116, 139, 0.1);
+  color: var(--slate-500);
+}
+
+.training-card-icon {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
+.training-card-name {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--slate-900);
+  margin: 0;
+}
+
+.dark .training-card-name {
+  color: var(--dark-text);
+}
+
+.training-card-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  font-size: 0.75rem;
+  color: var(--slate-500);
+  flex-wrap: wrap;
+}
+
+.dark .training-card-meta {
+  color: var(--dark-text-secondary);
+}
+
+.training-card-status {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.training-card-status-running {
+  background: rgba(59, 130, 246, 0.1);
+  color: var(--primary-500);
+}
+
+.training-card-status-completed {
+  background: rgba(16, 185, 129, 0.1);
+  color: var(--success-500);
+}
+
+.training-card-status-failed {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--error-500);
+}
+
+.training-card-status-paused {
+  background: rgba(245, 158, 11, 0.1);
+  color: var(--warning-500);
+}
+
+.training-card-status-pending {
+  background: rgba(100, 116, 139, 0.1);
+  color: var(--slate-500);
+}
+
+/* Progress */
+.training-progress {
+  margin-top: var(--spacing-sm);
+}
+
+.training-progress-header {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.75rem;
+  color: var(--slate-500);
+  margin-bottom: 0.25rem;
+}
+
+.dark .training-progress-header {
+  color: var(--dark-text-secondary);
+}
+
+.training-progress-bar {
+  width: 100%;
+  height: 0.375rem;
+  background: var(--slate-200);
+  border-radius: 9999px;
+  overflow: hidden;
+}
+
+.dark .training-progress-bar {
+  background: var(--slate-700);
+}
+
+.training-progress-fill {
+  height: 100%;
+  border-radius: 9999px;
+  transition: width 0.5s ease;
+}
+
+.training-progress-fill-running {
+  background: var(--primary-500);
+}
+
+.training-progress-fill-completed {
+  background: var(--success-500);
+}
+
+.training-progress-fill-failed {
+  background: var(--error-500);
+}
+
+.training-progress-fill-paused {
+  background: var(--warning-500);
+}
+
+/* Metrics Grid */
+.training-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--spacing-sm);
+  margin-top: var(--spacing-sm);
+  padding-top: var(--spacing-sm);
+  border-top: 1px solid var(--glass-border);
+}
+
+.dark .training-metrics-grid {
+  border-color: var(--dark-border);
+}
+
+.training-metric {
+  text-align: center;
+}
+
+.training-metric-label {
+  font-size: 0.75rem;
+  color: var(--slate-500);
+  margin: 0;
+}
+
+.dark .training-metric-label {
+  color: var(--dark-text-secondary);
+}
+
+.training-metric-value {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--slate-900);
+  margin: 0;
+}
+
+.dark .training-metric-value {
+  color: var(--dark-text);
+}
+
+/* Actions */
+.training-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  margin-top: var(--spacing-sm);
+  flex-wrap: wrap;
+}
+
+.training-action-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.375rem 0.75rem;
+  border-radius: var(--radius-lg);
+  font-size: 0.75rem;
+  font-weight: 500;
+  border: none;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  font-family: var(--font-sans);
+}
+
+.training-action-btn-primary {
+  background: var(--primary-500);
+  color: #ffffff;
+}
+
+.training-action-btn-primary:hover {
+  background: var(--primary-600);
+}
+
+.training-action-btn-success {
+  background: var(--success-500);
+  color: #ffffff;
+}
+
+.training-action-btn-success:hover {
+  background: var(--success-600);
+}
+
+.training-action-btn-warning {
+  background: var(--warning-500);
+  color: #ffffff;
+}
+
+.training-action-btn-warning:hover {
+  background: var(--warning-600);
+}
+
+.training-action-btn-danger {
+  background: var(--error-500);
+  color: #ffffff;
+}
+
+.training-action-btn-danger:hover {
+  background: var(--error-600);
+}
+
+.training-action-btn-secondary {
+  background: var(--slate-100);
+  color: var(--slate-600);
+}
+
+.dark .training-action-btn-secondary {
+  background: var(--slate-800);
+  color: var(--dark-text-secondary);
+}
+
+.training-action-btn-secondary:hover {
+  background: var(--slate-200);
+}
+
+.dark .training-action-btn-secondary:hover {
+  background: var(--slate-700);
+}
+
+/* ============================================
+   VERSIONS PANEL
+   ============================================ */
+.training-versions-panel {
+  margin-top: var(--spacing-lg);
+}
+
+/* ============================================
+   LOADING STATE - SAME AS DASHBOARD
+   ============================================ */
+.training-loading {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.training-loading-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.training-loading-title {
+  width: 12rem;
+  height: 2rem;
+  background: var(--slate-200);
+  border-radius: var(--radius-sm);
+}
+
+.dark .training-loading-title {
+  background: var(--slate-700);
+}
+
+.training-loading-btn {
+  width: 8rem;
+  height: 2.5rem;
+  background: var(--slate-200);
+  border-radius: var(--radius-xl);
+}
+
+.dark .training-loading-btn {
+  background: var(--slate-700);
+}
+
+.training-loading-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--spacing-md);
+}
+
+@media (min-width: 640px) {
+  .training-loading-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (min-width: 1024px) {
+  .training-loading-grid {
+    grid-template-columns: repeat(4, 1fr);
+  }
+}
+
+.training-loading-card {
+  background: var(--glass-bg);
+  border-radius: var(--radius-2xl);
+  padding: var(--spacing-md);
+}
+
+.training-loading-card-line {
+  height: 1rem;
+  background: var(--slate-200);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--spacing-xs);
+}
+
+.dark .training-loading-card-line {
+  background: var(--slate-700);
+}
+
+.training-loading-card-line-short {
+  width: 4rem;
+}
+
+.training-loading-chart {
+  background: var(--glass-bg);
+  border-radius: var(--radius-2xl);
+  padding: var(--spacing-md);
+  height: 16rem;
+}
+
+.training-loading-chart-inner {
+  width: 100%;
+  height: 100%;
+  background: var(--slate-200);
+  border-radius: var(--radius-lg);
+}
+
+.dark .training-loading-chart-inner {
+  background: var(--slate-700);
+}
+
+/* ============================================
+   VERSION INFO - SAME AS DASHBOARD
+   ============================================ */
+.training-version-info {
+  text-align: center;
+  font-size: 0.75rem;
+  color: var(--slate-400);
+  padding: var(--spacing-sm) 0;
+}
+
+.dark .training-version-info {
+  color: var(--slate-500);
+}
+
+/* ============================================
+   RESPONSIVE - SAME AS DASHBOARD
+   ============================================ */
+@media (max-width: 640px) {
+  .training-dashboard {
+    padding: var(--spacing-md);
+  }
+
+  .training-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .training-header-actions {
+    justify-content: flex-start;
+  }
+
+  .training-stats-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .training-stat-card {
+    padding: var(--spacing-md);
+  }
+
+  .training-stat-value {
+    font-size: 1.25rem;
+  }
+
+  .training-charts-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .training-metrics-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .training-card-header {
+    flex-direction: column;
+    gap: var(--spacing-sm);
+  }
+
+  .training-card-status {
+    align-self: flex-start;
+  }
+}
+
+@media (max-width: 480px) {
+  .training-stats-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .training-stat-card {
+    padding: var(--spacing-sm);
+  }
+
+  .training-stat-value {
+    font-size: 1rem;
+  }
+
+  .training-metrics-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .training-actions {
+    flex-wrap: wrap;
+  }
+
+  .training-chart-wrapper {
+    height: 12rem;
+  }
+}

@@ -1,0 +1,759 @@
+/* ============================================
+   MONITORING DASHBOARD - SAME SIZE AS DASHBOARD
+   ============================================ */
+
+/* ---------- CSS Variables ---------- */
+:root {
+  /* Colors */
+  --primary-50: #eff6ff;
+  --primary-100: #dbeafe;
+  --primary-200: #bfdbfe;
+  --primary-300: #93c5fd;
+  --primary-400: #60a5fa;
+  --primary-500: #3b82f6;
+  --primary-600: #2563eb;
+  --primary-700: #1d4ed8;
+  --primary-800: #1e40af;
+  --primary-900: #1e3a8a;
+
+  --accent-50: #fdf4ff;
+  --accent-100: #fae8ff;
+  --accent-200: #f5d0fe;
+  --accent-300: #f0abfc;
+  --accent-400: #e879f9;
+  --accent-500: #d946ef;
+  --accent-600: #c026d3;
+  --accent-700: #a21caf;
+  --accent-800: #86198f;
+  --accent-900: #701a75;
+
+  --success-500: #10b981;
+  --warning-500: #f59e0b;
+  --error-500: #ef4444;
+  --info-500: #3b82f6;
+
+  --slate-50: #f8fafc;
+  --slate-100: #f1f5f9;
+  --slate-200: #e2e8f0;
+  --slate-300: #cbd5e1;
+  --slate-400: #94a3b8;
+  --slate-500: #64748b;
+  --slate-600: #475569;
+  --slate-700: #334155;
+  --slate-800: #1e293b;
+  --slate-900: #0f172a;
+
+  /* Glass Effect - Same as Dashboard */
+  --glass-bg: rgba(255, 255, 255, 0.7);
+  --glass-border: rgba(255, 255, 255, 0.2);
+  --glass-shadow: rgba(0, 0, 0, 0.08);
+
+  /* Dark Mode - Same as Dashboard */
+  --dark-bg: rgba(15, 23, 42, 0.6);
+  --dark-border: rgba(51, 65, 85, 0.5);
+  --dark-text: #f1f5f9;
+  --dark-text-secondary: #94a3b8;
+
+  /* Spacing - Same as Dashboard */
+  --spacing-xs: 0.25rem;
+  --spacing-sm: 0.5rem;
+  --spacing-md: 1rem;
+  --spacing-lg: 1.5rem;
+  --spacing-xl: 2rem;
+  --spacing-2xl: 3rem;
+
+  /* Radius - Same as Dashboard */
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+  --radius-2xl: 1.25rem;
+  --radius-3xl: 1.5rem;
+
+  /* Transitions - Same as Dashboard */
+  --transition-fast: 0.15s ease;
+  --transition-normal: 0.25s ease;
+  --transition-slow: 0.4s ease;
+
+  /* Fonts */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+/* ---------- Dark Mode ---------- */
+.dark {
+  --glass-bg: rgba(30, 41, 59, 0.6);
+  --glass-border: rgba(51, 65, 85, 0.5);
+  --glass-shadow: rgba(0, 0, 0, 0.3);
+}
+
+/* ============================================
+   MAIN CONTAINER - SAME AS DASHBOARD
+   ============================================ */
+.monitoring-dashboard {
+  padding: var(--spacing-lg);
+  max-width: 1440px;
+  margin: 0 auto;
+  font-family: var(--font-sans);
+  color: var(--slate-900);
+}
+
+.dark .monitoring-dashboard {
+  color: var(--dark-text);
+}
+
+/* ============================================
+   HEADER - SAME AS DASHBOARD
+   ============================================ */
+.monitoring-header {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--spacing-md);
+  margin-bottom: var(--spacing-lg);
+}
+
+@media (min-width: 640px) {
+  .monitoring-header {
+    flex-direction: row;
+    align-items: center;
+  }
+}
+
+.monitoring-header-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--slate-900);
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  margin: 0;
+}
+
+.dark .monitoring-header-title {
+  color: var(--dark-text);
+}
+
+.monitoring-header-title-icon {
+  color: var(--primary-500);
+}
+
+.monitoring-header-subtitle {
+  font-size: 0.875rem;
+  color: var(--slate-500);
+  margin: var(--spacing-xs) 0 0 0;
+}
+
+.dark .monitoring-header-subtitle {
+  color: var(--dark-text-secondary);
+}
+
+.monitoring-header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
+}
+
+/* ============================================
+   TIME RANGE SELECTOR - SAME AS DASHBOARD FILTERS
+   ============================================ */
+.monitoring-time-range {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  border-radius: var(--radius-xl);
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+}
+
+.dark .monitoring-time-range {
+  background: rgba(30, 41, 59, 0.5);
+  border-color: var(--dark-border);
+}
+
+.monitoring-time-btn {
+  padding: 0.375rem 0.75rem;
+  border-radius: var(--radius-lg);
+  font-size: 0.75rem;
+  font-weight: 500;
+  border: none;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  font-family: var(--font-sans);
+  color: var(--slate-600);
+  background: transparent;
+}
+
+.dark .monitoring-time-btn {
+  color: var(--dark-text-secondary);
+}
+
+.monitoring-time-btn:hover {
+  background: rgba(241, 245, 249, 0.5);
+}
+
+.dark .monitoring-time-btn:hover {
+  background: rgba(30, 41, 59, 0.5);
+}
+
+.monitoring-time-btn-active {
+  background: var(--primary-500);
+  color: #ffffff;
+}
+
+.monitoring-time-btn-active:hover {
+  background: var(--primary-600);
+  color: #ffffff;
+}
+
+.monitoring-header-btn {
+  padding: 0.5rem;
+  border-radius: var(--radius-xl);
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  color: var(--slate-600);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+.dark .monitoring-header-btn {
+  color: var(--dark-text-secondary);
+  background: rgba(30, 41, 59, 0.5);
+  border-color: var(--dark-border);
+}
+
+.monitoring-header-btn:hover {
+  background: #ffffff;
+  border-color: var(--slate-300);
+}
+
+.dark .monitoring-header-btn:hover {
+  background: var(--slate-800);
+  border-color: var(--slate-700);
+}
+
+.monitoring-header-btn-badge {
+  position: absolute;
+  top: -0.25rem;
+  right: -0.25rem;
+  width: 1rem;
+  height: 1rem;
+  border-radius: 50%;
+  background: var(--error-500);
+  color: #ffffff;
+  font-size: 0.625rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ============================================
+   METRICS GRID - SAME AS DASHBOARD STATS GRID
+   ============================================ */
+.monitoring-metrics-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--spacing-md);
+  margin-bottom: var(--spacing-lg);
+}
+
+@media (min-width: 640px) {
+  .monitoring-metrics-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (min-width: 1024px) {
+  .monitoring-metrics-grid {
+    grid-template-columns: repeat(4, 1fr);
+  }
+}
+
+.monitoring-metric-card {
+  background: var(--glass-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-2xl);
+  box-shadow: 0 8px 32px var(--glass-shadow);
+  padding: var(--spacing-lg);
+  transition: all var(--transition-normal);
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.monitoring-metric-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.12);
+}
+
+.dark .monitoring-metric-card:hover {
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.3);
+}
+
+.monitoring-metric-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.monitoring-metric-label {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--slate-500);
+  margin: 0 0 var(--spacing-xs) 0;
+}
+
+.dark .monitoring-metric-label {
+  color: var(--dark-text-secondary);
+}
+
+.monitoring-metric-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--slate-900);
+  margin: 0;
+}
+
+.dark .monitoring-metric-value {
+  color: var(--dark-text);
+}
+
+.monitoring-metric-change {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-top: var(--spacing-xs);
+}
+
+.monitoring-metric-change-icon {
+  width: 0.75rem;
+  height: 0.75rem;
+}
+
+.monitoring-metric-change-icon-positive {
+  color: var(--success-500);
+}
+
+.monitoring-metric-change-icon-negative {
+  color: var(--error-500);
+}
+
+.monitoring-metric-change-text {
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.monitoring-metric-change-text-positive {
+  color: var(--success-500);
+}
+
+.monitoring-metric-change-text-negative {
+  color: var(--error-500);
+}
+
+.monitoring-metric-subtitle {
+  font-size: 0.75rem;
+  color: var(--slate-500);
+  margin: var(--spacing-xs) 0 0 0;
+}
+
+.dark .monitoring-metric-subtitle {
+  color: var(--dark-text-secondary);
+}
+
+.monitoring-metric-icon-wrapper {
+  padding: 0.75rem;
+  border-radius: var(--radius-xl);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-left: var(--spacing-md);
+}
+
+.monitoring-metric-icon-wrapper-text-success {
+  background: rgba(16, 185, 129, 0.1);
+  color: var(--success-500);
+}
+
+.monitoring-metric-icon-wrapper-text-primary {
+  background: rgba(59, 130, 246, 0.1);
+  color: var(--primary-500);
+}
+
+.monitoring-metric-icon-wrapper-text-error {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--error-500);
+}
+
+.monitoring-metric-icon-wrapper-text-warning {
+  background: rgba(245, 158, 11, 0.1);
+  color: var(--warning-500);
+}
+
+.monitoring-metric-icon {
+  width: 1.5rem;
+  height: 1.5rem;
+}
+
+/* ============================================
+   CHARTS SECTION - SAME AS DASHBOARD CHARTS
+   ============================================ */
+.monitoring-charts-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--spacing-lg);
+  margin-bottom: var(--spacing-lg);
+}
+
+@media (min-width: 1024px) {
+  .monitoring-charts-grid {
+    grid-template-columns: 2fr 1fr;
+  }
+}
+
+.monitoring-chart-card {
+  background: var(--glass-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-2xl);
+  box-shadow: 0 8px 32px var(--glass-shadow);
+  padding: var(--spacing-lg);
+}
+
+.monitoring-chart-card-large {
+  min-height: 300px;
+}
+
+.monitoring-chart-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--spacing-md);
+}
+
+.monitoring-chart-title {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--slate-900);
+  margin: 0;
+}
+
+.dark .monitoring-chart-title {
+  color: var(--dark-text);
+}
+
+.monitoring-chart-subtitle {
+  font-size: 0.75rem;
+  color: var(--slate-400);
+  margin: 0;
+}
+
+.monitoring-chart-live {
+  font-size: 0.75rem;
+  color: var(--slate-500);
+}
+
+.dark .monitoring-chart-live {
+  color: var(--dark-text-secondary);
+}
+
+.monitoring-chart-wrapper {
+  height: 16rem;
+}
+
+@media (min-width: 768px) {
+  .monitoring-chart-wrapper {
+    height: 18rem;
+  }
+}
+
+/* ============================================
+   STATUS OVERVIEW - SAME AS DASHBOARD CARD
+   ============================================ */
+.monitoring-status-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.monitoring-status-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.5);
+  transition: background var(--transition-fast);
+}
+
+.dark .monitoring-status-item {
+  background: rgba(30, 41, 59, 0.5);
+}
+
+.monitoring-status-item:hover {
+  background: rgba(241, 245, 249, 0.5);
+}
+
+.dark .monitoring-status-item:hover {
+  background: rgba(30, 41, 59, 0.8);
+}
+
+.monitoring-status-left {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  font-size: 0.875rem;
+  color: var(--slate-700);
+}
+
+.dark .monitoring-status-left {
+  color: var(--dark-text-secondary);
+}
+
+.monitoring-status-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.monitoring-status-dot-success {
+  background: var(--success-500);
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+.monitoring-status-dot-warning {
+  background: var(--warning-500);
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+.monitoring-status-dot-error {
+  background: var(--error-500);
+  animation: pulse-dot 1s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(0.8);
+  }
+}
+
+.monitoring-status-value {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--slate-900);
+}
+
+.dark .monitoring-status-value {
+  color: var(--dark-text);
+}
+
+.monitoring-status-value-success {
+  color: var(--success-500);
+}
+
+.monitoring-status-value-warning {
+  color: var(--warning-500);
+}
+
+.monitoring-status-value-error {
+  color: var(--error-500);
+}
+
+/* ============================================
+   ALERTS PANEL
+   ============================================ */
+.monitoring-alerts-panel {
+  margin-top: var(--spacing-lg);
+}
+
+/* ============================================
+   LOADING STATE - SAME AS DASHBOARD
+   ============================================ */
+.monitoring-loading {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.monitoring-loading-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.monitoring-loading-title {
+  width: 12rem;
+  height: 2rem;
+  background: var(--slate-200);
+  border-radius: var(--radius-sm);
+}
+
+.dark .monitoring-loading-title {
+  background: var(--slate-700);
+}
+
+.monitoring-loading-btn {
+  width: 10rem;
+  height: 2.5rem;
+  background: var(--slate-200);
+  border-radius: var(--radius-xl);
+}
+
+.dark .monitoring-loading-btn {
+  background: var(--slate-700);
+}
+
+.monitoring-loading-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--spacing-md);
+}
+
+@media (min-width: 640px) {
+  .monitoring-loading-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (min-width: 1024px) {
+  .monitoring-loading-grid {
+    grid-template-columns: repeat(4, 1fr);
+  }
+}
+
+.monitoring-loading-card {
+  background: var(--glass-bg);
+  border-radius: var(--radius-2xl);
+  padding: var(--spacing-lg);
+}
+
+.monitoring-loading-card-line {
+  height: 1rem;
+  background: var(--slate-200);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--spacing-xs);
+}
+
+.dark .monitoring-loading-card-line {
+  background: var(--slate-700);
+}
+
+.monitoring-loading-card-line-short {
+  width: 4rem;
+}
+
+.monitoring-loading-chart {
+  background: var(--glass-bg);
+  border-radius: var(--radius-2xl);
+  padding: var(--spacing-lg);
+  height: 16rem;
+}
+
+.monitoring-loading-chart-inner {
+  width: 100%;
+  height: 100%;
+  background: var(--slate-200);
+  border-radius: var(--radius-lg);
+}
+
+.dark .monitoring-loading-chart-inner {
+  background: var(--slate-700);
+}
+
+/* ============================================
+   VERSION INFO - SAME AS DASHBOARD
+   ============================================ */
+.monitoring-version-info {
+  text-align: center;
+  font-size: 0.75rem;
+  color: var(--slate-400);
+  padding: var(--spacing-sm) 0;
+}
+
+.dark .monitoring-version-info {
+  color: var(--slate-500);
+}
+
+/* ============================================
+   RESPONSIVE - SAME AS DASHBOARD
+   ============================================ */
+@media (max-width: 640px) {
+  .monitoring-dashboard {
+    padding: var(--spacing-md);
+  }
+
+  .monitoring-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .monitoring-header-actions {
+    justify-content: flex-start;
+  }
+
+  .monitoring-time-range {
+    flex-wrap: wrap;
+  }
+
+  .monitoring-metrics-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .monitoring-metric-card {
+    padding: var(--spacing-md);
+  }
+
+  .monitoring-metric-value {
+    font-size: 1.25rem;
+  }
+
+  .monitoring-charts-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .monitoring-status-item {
+    padding: var(--spacing-xs) var(--spacing-sm);
+  }
+}
+
+@media (max-width: 480px) {
+  .monitoring-metrics-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .monitoring-metric-card {
+    padding: var(--spacing-sm);
+  }
+
+  .monitoring-metric-value {
+    font-size: 1rem;
+  }
+
+  .monitoring-chart-wrapper {
+    height: 12rem;
+  }
+}
