@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:6.0
+    container_name: smart-devops-mongodb
+    restart: always
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: admin123
+      MONGO_INITDB_DATABASE: smart_devops
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - smart-devops-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: smart-devops-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    networks:
+      - smart-devops-network
+
+  backend:
+    build: .
+    container_name: smart-devops-backend
+    restart: always
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=production
+      - MONGODB_URI=mongodb://admin:admin123@mongodb:27017/smart_devops?authSource=admin
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - mongodb
+      - redis
+    volumes:
+      - ./uploads:/app/uploads
+      - ./.env:/app/.env
+    networks:
+      - smart-devops-network
+
+volumes:
+  mongodb_data:
+
+networks:
+  smart-devops-network:
+    driver: bridge
