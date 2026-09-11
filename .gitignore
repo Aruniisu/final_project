@@ -1,5 +1,38 @@
-node_modules/
-venv/
-.env
-build/
+# Backups
+*.backup
+*.bak
+*~
+
+# Python cache
 __pycache__/
+*.pyc
+
+# Venv
+venv/
+env/
+
+# Env files
+.env
+*.env
+!.env.example
+
+# Node
+node_modules/
+package-lock.json
+frontend/node_modules/
+
+# Build
+build/
+dist/
+frontend/build/
+
+# Uploads
+uploads/*
+!uploads/.gitkeep
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
