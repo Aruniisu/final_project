@@ -1,0 +1,589 @@
+"""
+MultiProviderDeployService — Direct Upload (Production Ready)
+==============================================================
+Build locally → Upload ZIP → No GitHub access needed.
+
+Providers:
+- Netlify: Direct ZIP upload (no git)
+- Vercel: Direct file upload (no git)
+- Render: Git-based (needs GitHub App)
+"""
+
+import os
+import re
+import time
+import json
+import shutil
+import random
+import string
+import subprocess
+import tempfile
+import zipfile
+import requests
+from typing import Dict, Any, Optional
+
+
+class MultiProviderDeployService:
+    """Direct Upload — no GitHub access needed."""
+
+    def __init__(self, agent=None):
+        self.agent = agent
+        self.vercel_token = os.getenv('VERCEL_TOKEN')
+        self.netlify_token = os.getenv('NETLIFY_TOKEN')
+        self.render_api_key = os.getenv('RENDER_API_KEY')
+        self.render_owner_id = os.getenv('RENDER_OWNER_ID')
+        self.github_token = os.getenv('GITHUB_TOKEN')
+        self.temp_root = os.path.join(tempfile.gettempdir(), 'deploy_direct')
+        os.makedirs(self.temp_root, exist_ok=True)
+
+    # ============================================
+    # HELPERS
+    # ============================================
+    def _suffix(self, n=6):
+        return ''.join(random.choices(string.ascii_lowercase + string.digits, k=n))
+
+    def _safe_name(self, repo, max_len=30):
+        name = re.sub(r'[^a-z0-9\-]', '-', repo.lower())
+        name = re.sub(r'-+', '-', name).strip('-')
+        return name[:max_len] or 'app'
+
+    def _run_stream(self, cmd, cwd, log, timeout=900, env=None):
+        """Run command, stream output."""
+        try:
+            log(f"   ▶️  {cmd[:80]}")
+            proc = subprocess.Popen(
+                cmd, cwd=cwd, shell=True,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+                env=env or os.environ.copy(),
+                encoding='utf-8', errors='replace',
+            )
+            lines = []
+            last_hb = time.time()
+            start = time.time()
+
+            for line in iter(proc.stdout.readline, ''):
+                if not line:
+                    break
+                line = line.rstrip()
+                lines.append(line)
+
+                if time.time() - last_hb > 15:
+                    log(f"      ⏳ {time.time()-start:.0f}s...")
+                    last_hb = time.time()
+
+                low = line.lower()
+                if any(k in low for k in [
+                    'error', 'fail', 'warn', 'added', 'removed',
+                    'compil', 'build', 'done', 'success', 'ready',
+                ]):
+                    log(f"      {line[:200]}")
+                    last_hb = time.time()
+
+                if time.time() - start > timeout:
+                    proc.kill()
+                    return False, '\n'.join(lines[-50:])
+
+            proc.wait(timeout=60)
+            return proc.returncode == 0, '\n'.join(lines[-50:])
+        except Exception as e:
+            return False, str(e)[:200]
+
+    def _clone_repo(self, owner, repo, branch, log):
+        """Clone repo to temp."""
+        deploy_id = f"{owner}-{repo}-{self._suffix()}"
+        target = os.path.join(self.temp_root, deploy_id)
+
+        if os.path.exists(target):
+            shutil.rmtree(target, ignore_errors=True)
+
+        token = self.github_token
+        clone_url = f'https://{token}@github.com/{owner}/{repo}.git' if token else f'https://github.com/{owner}/{repo}.git'
+
+        log(f"   📥 Cloning...")
+        try:
+            result = subprocess.run(
+                ['git', 'clone', '--depth', '1', '--single-branch', '-b', branch, clone_url, target],
+                capture_output=True, text=True, timeout=180,
+            )
+            if result.returncode != 0:
+                return None, f'Clone failed: {result.stderr[:200]}'
+            log(f"   ✅ Cloned")
+            return target, None
+        except Exception as e:
+            return None, str(e)[:200]
+
+    def _detect_frontend(self, repo_path):
+        """Detect frontend dir + build config."""
+        result = {
+            'root': None,
+            'framework': 'unknown',
+            'build_cmd': 'npm run build',
+            'output': 'build',
+            'node_version': '20',
+        }
+
+        for cand in ['.', 'frontend', 'client', 'web', 'ui']:
+            p = repo_path if cand == '.' else os.path.join(repo_path, cand)
+            pkg = os.path.join(p, 'package.json')
+            if os.path.exists(pkg):
+                result['root'] = p
+                try:
+                    with open(pkg) as f:
+                        data = json.load(f)
+                    deps = {**data.get('dependencies', {}), **data.get('devDependencies', {})}
+                    if 'next' in deps:
+                        result['framework'] = 'next'
+                        result['output'] = '.next'
+                    elif 'vite' in deps:
+                        result['framework'] = 'vite'
+                        result['output'] = 'dist'
+                    elif 'react-scripts' in deps or 'react' in deps:
+                        result['framework'] = 'react'
+                        result['output'] = 'build'
+                    elif 'vue' in deps:
+                        result['framework'] = 'vue'
+                        result['output'] = 'dist'
+                    elif 'angular' in deps:
+                        result['framework'] = 'angular'
+                        result['output'] = 'dist'
+                    engines = data.get('engines', {})
+                    if 'node' in engines:
+                        v = re.sub(r'[^0-9]', '', str(engines['node']))[:2]
+                        if v:
+                            result['node_version'] = v
+                except Exception:
+                    pass
+                break
+
+        return result
+
+    def _build_frontend(self, frontend_path, output, log):
+        """Build frontend locally."""
+        log(f"   📦 npm install...")
+        ok, out = self._run_stream(
+            'npm install --no-audit --no-fund --legacy-peer-deps',
+            frontend_path, log, timeout=900,
+        )
+        if not ok:
+            return None, f'npm install failed: {out[:300]}'
+
+        log(f"   🔨 npm run build...")
+        env = os.environ.copy()
+        env['NODE_OPTIONS'] = '--max-old-space-size=4096'
+        env['CI'] = 'false'
+        env['GENERATE_SOURCEMAP'] = 'false'
+        env['DISABLE_ESLINT_PLUGIN'] = 'true'
+        env['TSC_COMPILE_ON_ERROR'] = 'true'
+
+        ok, out = self._run_stream('npm run build', frontend_path, log, timeout=900, env=env)
+        if not ok:
+            return None, f'Build failed: {out[:300]}'
+
+        for o in [output, 'build', 'dist', 'out', '.next', 'public']:
+            p = os.path.join(frontend_path, o)
+            if os.path.exists(p) and os.path.isdir(p):
+                redirects = os.path.join(p, '_redirects')
+                try:
+                    with open(redirects, 'w', newline='\n') as f:
+                        f.write('/*    /index.html   200\n')
+                    log(f"   ✅ Added _redirects")
+                except Exception:
+                    pass
+                log(f"   ✅ Build output: {o}/")
+                return p, None
+
+        return None, 'No build output'
+
+    def _zip_dir(self, source_dir, zip_path):
+        """Zip a directory."""
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for root, dirs, files in os.walk(source_dir):
+                for file in files:
+                    fp = os.path.join(root, file)
+                    arcname = os.path.relpath(fp, source_dir)
+                    zf.write(fp, arcname)
+
+    # ============================================
+    # MAIN DEPLOY
+    # ============================================
+    def deploy(self, provider, owner, repo, repo_url, default_branch, stack_info, sid=None, on_log=None):
+        provider = (provider or '').lower().strip()
+
+        def log(msg, level='info'):
+            try:
+                print(f"[{provider.upper()}] {msg}", flush=True)
+            except Exception:
+                pass
+            if on_log:
+                try:
+                    on_log(msg, level)
+                except Exception:
+                    pass
+
+        log("=" * 60)
+        log(f"🚀 {provider.upper()} Deploy: {owner}/{repo}")
+        log("=" * 60)
+
+        repo_path, err = self._clone_repo(owner, repo, default_branch, log)
+        if not repo_path:
+            return {'success': False, 'error': err}
+
+        try:
+            frontend = self._detect_frontend(repo_path)
+            if not frontend['root']:
+                return {'success': False, 'error': 'No frontend (package.json) found'}
+
+            log(f"   🔍 Framework: {frontend['framework']}")
+            log(f"   📁 Root: {os.path.basename(frontend['root'])}")
+            log(f"   📁 Output: {frontend['output']}")
+
+            log("")
+            log("   🔨 Local build...")
+            build_path, err = self._build_frontend(frontend['root'], frontend['output'], log)
+            if not build_path:
+                return {'success': False, 'error': err}
+
+            log("")
+            if provider == 'netlify':
+                return self._deploy_netlify_direct(build_path, owner, repo, log)
+            elif provider == 'vercel':
+                return self._deploy_vercel_direct(build_path, owner, repo, log)
+            elif provider == 'render':
+                return self._deploy_render_direct(repo_path, owner, repo, default_branch, log)
+            else:
+                return {'success': False, 'error': f'Unknown: {provider}'}
+
+        finally:
+            try:
+                shutil.rmtree(repo_path, ignore_errors=True)
+            except Exception:
+                pass
+
+    # ============================================
+    # NETLIFY — Direct ZIP Upload
+    # ============================================
+    def _deploy_netlify_direct(self, build_path, owner, repo, log):
+        """Deploy pre-built files to Netlify via ZIP."""
+        if not self.netlify_token:
+            return {'success': False, 'error': 'NETLIFY_TOKEN not set'}
+
+        site_name = f"{self._safe_name(repo)}-{self._suffix(6)}"
+        log(f"   📦 Netlify: {site_name}")
+
+        try:
+            r = requests.post(
+                'https://api.netlify.com/api/v1/sites',
+                headers={
+                    'Authorization': f'Bearer {self.netlify_token}',
+                    'Content-Type': 'application/json',
+                },
+                json={'name': site_name},
+                timeout=30,
+            )
+
+            if r.status_code == 422 and 'subdomain' in r.text.lower():
+                site_name = f"{self._safe_name(repo)}-{self._suffix(12)}"
+                r = requests.post(
+                    'https://api.netlify.com/api/v1/sites',
+                    headers={
+                        'Authorization': f'Bearer {self.netlify_token}',
+                        'Content-Type': 'application/json',
+                    },
+                    json={'name': site_name},
+                    timeout=30,
+                )
+
+            if r.status_code not in (200, 201):
+                return {'success': False, 'error': f'Create site: {r.text[:300]}'}
+
+            data = r.json()
+            site_id = data.get('id')
+            site_name = data.get('name', site_name)
+            url = f'https://{site_name}.netlify.app'
+
+            log(f"   ✅ Site: {site_id}")
+            log(f"   🌐 URL: {url}")
+
+            log(f"   📦 Creating ZIP...")
+            zip_path = os.path.join(self.temp_root, f'netlify-{site_id}.zip')
+            self._zip_dir(build_path, zip_path)
+            zip_size = os.path.getsize(zip_path) / (1024 * 1024)
+            log(f"   📦 ZIP: {zip_size:.1f} MB")
+
+            log(f"   🚀 Uploading...")
+            with open(zip_path, 'rb') as f:
+                zip_data = f.read()
+
+            r = requests.post(
+                f'https://api.netlify.com/api/v1/sites/{site_id}/deploys',
+                headers={
+                    'Authorization': f'Bearer {self.netlify_token}',
+                    'Content-Type': 'application/zip',
+                },
+                data=zip_data,
+                timeout=600,
+            )
+
+            if r.status_code not in (200, 201):
+                return {'success': False, 'error': f'Deploy: {r.text[:300]}'}
+
+            deploy_data = r.json()
+            deploy_id = deploy_data.get('id')
+            deploy_state = deploy_data.get('state')
+
+            log(f"   🚀 Deploy: {deploy_id}")
+            log(f"   📊 State: {deploy_state}")
+
+            try:
+                os.remove(zip_path)
+            except Exception:
+                pass
+
+            start = time.time()
+            while time.time() - start < 300:
+                try:
+                    pr = requests.get(
+                        f'https://api.netlify.com/api/v1/sites/{site_id}/deploys/{deploy_id}',
+                        headers={'Authorization': f'Bearer {self.netlify_token}'},
+                        timeout=15,
+                    )
+                    if pr.status_code == 200:
+                        pd = pr.json()
+                        state = pd.get('state')
+                        if state != deploy_state:
+                            log(f"   📊 {state}")
+                            deploy_state = state
+                        if state == 'ready':
+                            log(f"   ✅ Ready: {url}")
+                            return {
+                                'success': True, 'provider': 'netlify',
+                                'url': url, 'primary_url': url, 'live_url': url,
+                                'frontend_url': url,
+                                'frontend_ready': True, 'backend_ready': False,
+                                'site_id': site_id, 'site_name': site_name,
+                                'deploy_id': deploy_id,
+                            }
+                        elif state in ('error', 'failed'):
+                            return {'success': False, 'error': f'Deploy {state}'}
+                except Exception:
+                    pass
+                time.sleep(5)
+
+            return {
+                'success': True, 'provider': 'netlify',
+                'url': url, 'primary_url': url, 'live_url': url,
+                'frontend_url': url,
+                'frontend_ready': True, 'backend_ready': False,
+                'site_id': site_id, 'site_name': site_name,
+                'note': 'Deploy in progress',
+            }
+
+        except Exception as e:
+            log(f"   ❌ {str(e)[:200]}")
+            return {'success': False, 'error': str(e)[:300]}
+
+    # ============================================
+    # VERCEL — Direct File Upload
+    # ============================================
+    def _deploy_vercel_direct(self, build_path, owner, repo, log):
+        """Deploy pre-built files to Vercel via inline files."""
+        if not self.vercel_token:
+            return {'success': False, 'error': 'VERCEL_TOKEN not set'}
+
+        project_name = f"{self._safe_name(repo)}-{self._suffix(6)}"
+        log(f"   📦 Vercel: {project_name}")
+
+        try:
+            files = []
+            import base64
+            for root, dirs, fnames in os.walk(build_path):
+                for fname in fnames:
+                    fp = os.path.join(root, fname)
+                    rel = os.path.relpath(fp, build_path).replace('\\', '/')
+                    try:
+                        with open(fp, 'rb') as f:
+                            content = f.read()
+                        try:
+                            text = content.decode('utf-8')
+                            files.append({'file': rel, 'data': text})
+                        except UnicodeDecodeError:
+                            files.append({
+                                'file': rel,
+                                'data': base64.b64encode(content).decode(),
+                                'encoding': 'base64',
+                            })
+                    except Exception:
+                        pass
+
+            log(f"   📤 Uploading {len(files)} files...")
+
+            deploy_body = {
+                'name': project_name,
+                'files': files,
+                'projectSettings': {'framework': None},
+                'target': 'production',
+            }
+
+            r = requests.post(
+                'https://api.vercel.com/v13/deployments',
+                headers={
+                    'Authorization': f'Bearer {self.vercel_token}',
+                    'Content-Type': 'application/json',
+                },
+                json=deploy_body,
+                timeout=180,
+            )
+
+            if r.status_code not in (200, 201):
+                return {'success': False, 'error': f'Vercel: {r.text[:300]}'}
+
+            data = r.json()
+            deploy_id = data.get('id')
+
+            log(f"   🚀 Deploy: {deploy_id}")
+
+            start = time.time()
+            last_state = None
+            while time.time() - start < 300:
+                try:
+                    pr = requests.get(
+                        f'https://api.vercel.com/v13/deployments/{deploy_id}',
+                        headers={'Authorization': f'Bearer {self.vercel_token}'},
+                        timeout=15,
+                    )
+                    if pr.status_code == 200:
+                        pd = pr.json()
+                        state = pd.get('readyState') or pd.get('status')
+                        if state != last_state:
+                            log(f"   📊 {state}")
+                            last_state = state
+                        if state == 'READY':
+                            url = f'https://{project_name}.vercel.app'
+                            log(f"   ✅ URL: {url}")
+                            return {
+                                'success': True, 'provider': 'vercel',
+                                'url': url, 'primary_url': url, 'live_url': url,
+                                'frontend_url': url,
+                                'frontend_ready': True, 'backend_ready': False,
+                                'project_name': project_name,
+                                'deploy_id': deploy_id,
+                            }
+                        elif state in ('ERROR', 'CANCELED'):
+                            err = pd.get('errorMessage') or state
+                            return {'success': False, 'error': f'Build {state}: {err}'}
+                except Exception:
+                    pass
+                time.sleep(8)
+
+            return {'success': False, 'error': 'Vercel timeout'}
+
+        except Exception as e:
+            log(f"   ❌ {str(e)[:200]}")
+            return {'success': False, 'error': str(e)[:300]}
+
+    # ============================================
+    # RENDER — Git-based
+    # ============================================
+    def _deploy_render_direct(self, repo_path, owner, repo, branch, log):
+        """Render deploy — via Git (needs GitHub App on Render)."""
+        if not self.render_api_key:
+            return {'success': False, 'error': 'RENDER_API_KEY not set'}
+
+        service_name = f"{self._safe_name(repo)}-{self._suffix(6)}"
+
+        backend_dir = None
+        backend_lang = 'python'
+
+        for d in ['backend', 'server', 'api']:
+            bp = os.path.join(repo_path, d)
+            if os.path.isdir(bp):
+                backend_dir = d
+                if os.path.exists(os.path.join(bp, 'requirements.txt')):
+                    backend_lang = 'python'
+                elif os.path.exists(os.path.join(bp, 'package.json')):
+                    backend_lang = 'node'
+                break
+
+        if not backend_dir:
+            return {'success': False, 'error': 'No backend found'}
+
+        if backend_lang == 'python':
+            env = 'python'
+            build_cmd = 'pip install -r requirements.txt'
+            start_cmd = 'gunicorn app:app --bind 0.0.0.0:$PORT'
+        else:
+            env = 'node'
+            build_cmd = 'npm install'
+            start_cmd = 'npm start'
+
+        log(f"   📦 Render: {service_name}")
+        log(f"   🐍 {backend_lang}")
+        log(f"   📁 {backend_dir}")
+
+        try:
+            service_details = {
+                'env': env,
+                'plan': 'free',
+                'region': 'oregon',
+                'buildCommand': build_cmd,
+                'startCommand': start_cmd,
+                'autoDeploy': 'yes',
+                'rootDir': backend_dir,
+            }
+
+            body = {
+                'type': 'web_service',
+                'name': service_name,
+                'ownerId': self.render_owner_id,
+                'repo': f'https://github.com/{owner}/{repo}',
+                'branch': branch,
+                'autoDeploy': 'yes',
+                'serviceDetails': service_details,
+            }
+
+            r = requests.post(
+                'https://api.render.com/v1/services',
+                headers={
+                    'Authorization': f'Bearer {self.render_api_key}',
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                },
+                json=body, timeout=30,
+            )
+
+            if r.status_code in (409, 422):
+                service_name = f"{self._safe_name(repo)}-{self._suffix(12)}"
+                body['name'] = service_name
+                r = requests.post(
+                    'https://api.render.com/v1/services',
+                    headers={
+                        'Authorization': f'Bearer {self.render_api_key}',
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json',
+                    },
+                    json=body, timeout=30,
+                )
+
+            if r.status_code not in (200, 201):
+                return {'success': False, 'error': f'Render: {r.text[:300]}'}
+
+            data = r.json()
+            service = data.get('service', data)
+            service_id = service.get('id')
+
+            log(f"   ✅ Service: {service_id}")
+
+            url = f'https://{service_name}.onrender.com'
+
+            return {
+                'success': True, 'provider': 'render',
+                'url': url, 'primary_url': url, 'live_url': url,
+                'backend_url': url,
+                'frontend_ready': False, 'backend_ready': True,
+                'service_id': service_id, 'service_name': service_name,
+            }
+
+        except Exception as e:
+            log(f"   ❌ {str(e)[:200]}")
+            return {'success': False, 'error': str(e)[:300]}

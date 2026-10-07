@@ -1,0 +1,960 @@
+"""
+SelfHostService — Agent's Own Deployment Platform
+==================================================
+Deploy frontend + backend on agent's OWN infrastructure.
+
+Features:
+- Multi-language (Python, Node, Go, Rust, PHP, Java, Ruby, .NET, static)
+- Frontend-only / Backend-only / Fullstack deployment
+- deploy_type filter (auto / frontend / backend / fullstack)
+- Parallel frontend + backend builds
+- ⭐ Build cache (node_modules, .venv)
+- ⭐ Increased timeouts (npm 30min, venv 10min)
+- ⭐ npm install (not ci) for faster builds
+- Single URL (proxy for /api → backend, / → frontend)
+- Public URL via Cloudflare Tunnel (retry) + LAN fallback
+- Deployments registry (list, get, stop, delete)
+"""
+
+import os
+import re
+import sys
+import json
+import time
+import shutil
+import hashlib
+import socket
+import subprocess
+from pathlib import Path
+from typing import Dict, Any, Optional, List
+
+
+class SelfHostService:
+    """Self-hosted deployment service — agent's own platform."""
+
+    LANG_PATTERNS = {
+        'python': ['requirements.txt', 'pyproject.toml', 'Pipfile', 'setup.py', 'manage.py'],
+        'node': ['package.json'],
+        'go': ['go.mod', 'go.sum'],
+        'rust': ['Cargo.toml'],
+        'php': ['composer.json', 'index.php'],
+        'java': ['pom.xml', 'build.gradle'],
+        'ruby': ['Gemfile', 'Gemfile.lock'],
+        'static': ['index.html'],
+    }
+
+    # ⭐ Timeouts (seconds)
+    TIMEOUT_INSTALL = 1800   # 30 min for npm install
+    TIMEOUT_BUILD = 1800     # 30 min for npm run build
+    TIMEOUT_VENV = 600       # 10 min for python venv
+    TIMEOUT_PIP = 900        # 15 min for pip install
+    TIMEOUT_GIT = 300        # 5 min for git clone
+
+    def __init__(self, agent=None):
+        self.agent = agent
+        self.deploy_root = os.getenv('SELF_HOST_ROOT', 'D:/dev/final_project/deployments')
+        self.cache_root = os.path.join(self.deploy_root, '_cache')
+        self.public_domain = os.getenv('PUBLIC_DOMAIN', 'localhost')
+        self.port_start = int(os.getenv('SELF_HOST_PORT_START', '8000'))
+        self.registry_file = os.path.join(self.deploy_root, '_registry.json')
+
+        os.makedirs(self.deploy_root, exist_ok=True)
+        os.makedirs(self.cache_root, exist_ok=True)
+
+        self.active_processes = {}
+        self._tunnel_procs = {}
+
+    # ============================================
+    # MAIN
+    # ============================================
+    def deploy(
+        self,
+        owner: str,
+        repo: str,
+        repo_url: str,
+        default_branch: str,
+        stack_info: Optional[Dict] = None,
+        sid: Optional[str] = None,
+        on_log=None,
+    ) -> Dict:
+        """Deploy any repo. Returns ONE URL."""
+
+        def log(msg, level='info'):
+            print(f"[SELF-HOST] {msg}")
+            if on_log:
+                on_log(msg, level)
+
+        log("=" * 60)
+        log(f"🏠 Self-Hosting: {owner}/{repo}")
+        log("=" * 60)
+
+        # STEP 1: Allocate
+        log("")
+        log("📍 Step 1/8: Allocating deployment slot")
+        deploy_id = self._generate_deploy_id(owner, repo)
+        log(f"   Deploy ID: {deploy_id}")
+
+        deploy_dir = os.path.join(self.deploy_root, deploy_id)
+        os.makedirs(deploy_dir, exist_ok=True)
+
+        # STEP 2: Clone
+        log("")
+        log("📍 Step 2/8: Cloning repository")
+        repo_dir = os.path.join(deploy_dir, 'repo')
+
+        try:
+            clone_url = self._inject_token(repo_url)
+            result = subprocess.run(
+                ['git', 'clone', '--depth', '1', '-b', default_branch, clone_url, repo_dir],
+                capture_output=True, text=True, timeout=self.TIMEOUT_GIT,
+            )
+            if result.returncode != 0:
+                return {'success': False, 'error': f'Clone failed: {result.stderr[:300]}'}
+            log(f"   ✅ Cloned")
+        except Exception as e:
+            return {'success': False, 'error': f'Clone error: {str(e)[:200]}'}
+
+        # STEP 3: Detect structure
+        log("")
+        log("📍 Step 3/8: Detecting structure")
+        detection = self._detect_structure(repo_dir)
+        log(f"   Detected: {detection['type']}")
+        log(f"   Languages: {', '.join(detection['languages'])}")
+        if detection.get('frontend'):
+            log(f"   Frontend: {detection['frontend']}")
+        if detection.get('backend'):
+            log(f"   Backend: {detection['backend']} ({detection.get('backend_lang', 'unknown')})")
+
+        # Apply user's deploy_type preference
+        deploy_type = (stack_info or {}).get('deploy_type', 'auto')
+        log(f"   🎯 Deploy type preference: {deploy_type}")
+
+        if deploy_type == 'frontend':
+            log(f"   ⚙️  FRONTEND ONLY — skipping backend")
+            detection['backend'] = None
+            detection['type'] = 'frontend'
+        elif deploy_type == 'backend':
+            log(f"   ⚙️  BACKEND ONLY — skipping frontend")
+            detection['frontend'] = None
+            detection['type'] = 'backend'
+        elif deploy_type == 'fullstack':
+            log(f"   ⚙️  FULLSTACK — both frontend + backend")
+        else:
+            log(f"   ⚙️  AUTO — using detected structure")
+
+        # STEP 4: Parallel Build
+        log("")
+        log("📍 Step 4/8: Building (parallel)")
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        frontend_ready = False
+        backend_ready = False
+        frontend_build_path = None
+
+        def build_fe():
+            if detection.get('frontend'):
+                return self._build_frontend(repo_dir, detection['frontend'], log)
+            return {'success': False, 'skipped': True}
+
+        def build_be():
+            if detection.get('backend'):
+                return self._build_backend(
+                    repo_dir, detection['backend'],
+                    detection.get('backend_lang', 'unknown'), log
+                )
+            return {'success': False, 'skipped': True}
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            fe_future = executor.submit(build_fe)
+            be_future = executor.submit(build_be)
+
+            fe_result = fe_future.result()
+            be_result = be_future.result()
+
+        frontend_ready = fe_result.get('success', False)
+        frontend_build_path = fe_result.get('build_path')
+        backend_ready = be_result.get('success', False)
+
+        if not frontend_ready and not fe_result.get('skipped'):
+            log(f"   ⚠️ Frontend failed: {fe_result.get('error')}")
+        if not backend_ready and not be_result.get('skipped'):
+            log(f"   ⚠️ Backend failed: {be_result.get('error')}")
+
+        if not frontend_ready and not backend_ready:
+            log(f"   ⚠️ Both builds failed — deploying anyway (may show error)")
+            # Continue anyway to give URL
+
+        # STEP 5: Ports
+        log("")
+        log("📍 Step 5/8: Allocating ports")
+        backend_port = self._find_free_port()
+        proxy_port = self._find_free_port()
+        log(f"   Ports: backend={backend_port}, proxy={proxy_port}")
+
+        # STEP 6: Start backend
+        backend_proc = None
+        if backend_ready:
+            log("")
+            log("📍 Step 6/8: Starting backend")
+            backend_proc = self._start_backend(
+                deploy_id, deploy_dir, repo_dir,
+                detection['backend'], detection.get('backend_lang', 'unknown'),
+                backend_port, log,
+            )
+
+        # STEP 7: Start proxy
+        log("")
+        log("📍 Step 7/8: Starting reverse proxy")
+        proxy_proc = self._start_proxy(
+            deploy_id, deploy_dir,
+            frontend_ready, frontend_build_path,
+            backend_ready, backend_port,
+            proxy_port, log,
+        )
+
+        # STEP 8: Public URL
+        log("")
+        log("📍 Step 8/8: Generating public URL")
+        public_url = self._expose_url(deploy_id, proxy_port, log)
+        if not public_url:
+            public_url = f'http://localhost:{proxy_port}'
+            log(f"   ⚠️ Fallback: {public_url}")
+
+        # Save to registry
+        self._save_to_registry(deploy_id, {
+            'id': deploy_id,
+            'owner': owner,
+            'repo': repo,
+            'repo_url': repo_url,
+            'url': public_url,
+            'deploy_type': deploy_type,
+            'status': 'success',
+            'frontend_ready': frontend_ready,
+            'backend_ready': backend_ready,
+            'proxy_port': proxy_port,
+            'backend_port': backend_port,
+            'deployed_at': time.time(),
+        })
+
+        self.active_processes[deploy_id] = {
+            'backend': backend_proc,
+            'proxy': proxy_proc,
+        }
+
+        # Final summary
+        log("")
+        log("=" * 60)
+        log(f"🎉 DEPLOYMENT SUCCESSFUL")
+        log(f"   🌐 URL: {public_url}")
+        log(f"   🎯 Type: {deploy_type}")
+        log(f"   🎨 Frontend: {'✅' if frontend_ready else '❌'}")
+        log(f"   ⚙️  Backend: {'✅' if backend_ready else '❌'}")
+        log("=" * 60)
+
+        return {
+            'success': True,
+            'provider': 'self-host',
+            'deploy_id': deploy_id,
+            'url': public_url,
+            'primary_url': public_url,
+            'live_url': public_url,
+            'frontend_url': public_url if frontend_ready else None,
+            'backend_url': f'{public_url}/api' if backend_ready else None,
+            'deploy_type': deploy_type,
+            'frontend_ready': frontend_ready,
+            'backend_ready': backend_ready,
+        }
+
+    # ============================================
+    # REGISTRY METHODS
+    # ============================================
+    def list_deployments(self) -> Dict:
+        """List all deployments from registry."""
+        registry = {}
+        if os.path.exists(self.registry_file):
+            try:
+                with open(self.registry_file, 'r') as f:
+                    content = f.read().strip()
+                    if content:
+                        registry = json.loads(content)
+            except Exception as e:
+                print(f"[SELF-HOST] Registry read error: {e}")
+                registry = {}
+        return registry
+
+    def get_deployment(self, deploy_id: str) -> Optional[Dict]:
+        """Get a specific deployment by ID."""
+        registry = self.list_deployments()
+        return registry.get(deploy_id)
+
+    def stop_deployment(self, deploy_id: str) -> Dict:
+        """Stop a deployment (keeps in registry with status=stopped)."""
+        try:
+            procs = self.active_processes.get(deploy_id, {})
+            killed = []
+            for proc_type, proc in procs.items():
+                if proc and proc.poll() is None:
+                    try:
+                        proc.terminate()
+                        killed.append(proc_type)
+                    except Exception:
+                        pass
+
+            # Kill tunnel
+            tunnel = self._tunnel_procs.get(deploy_id)
+            if tunnel and tunnel.poll() is None:
+                try:
+                    tunnel.terminate()
+                    killed.append('tunnel')
+                except Exception:
+                    pass
+
+            self.active_processes.pop(deploy_id, None)
+            self._tunnel_procs.pop(deploy_id, None)
+
+            registry = self.list_deployments()
+            if deploy_id in registry:
+                registry[deploy_id]['status'] = 'stopped'
+                registry[deploy_id]['stopped_at'] = time.time()
+                self._write_registry(registry)
+
+            return {
+                'success': True,
+                'deploy_id': deploy_id,
+                'killed': killed,
+                'message': f'Deployment {deploy_id} stopped',
+            }
+
+        except Exception as e:
+            return {'success': False, 'error': str(e)[:200]}
+
+    def delete_deployment(self, deploy_id: str) -> Dict:
+        """Delete a deployment (stop + remove from registry + cleanup dir)."""
+        try:
+            self.stop_deployment(deploy_id)
+
+            registry = self.list_deployments()
+            if deploy_id in registry:
+                del registry[deploy_id]
+                self._write_registry(registry)
+
+            deploy_dir = os.path.join(self.deploy_root, deploy_id)
+            if os.path.exists(deploy_dir):
+                try:
+                    shutil.rmtree(deploy_dir, ignore_errors=True)
+                except Exception:
+                    pass
+
+            return {
+                'success': True,
+                'deploy_id': deploy_id,
+                'message': f'Deployment {deploy_id} deleted',
+            }
+
+        except Exception as e:
+            return {'success': False, 'error': str(e)[:200]}
+
+    # ============================================
+    # Structure Detection
+    # ============================================
+    def _detect_structure(self, repo_dir: str) -> Dict:
+        detection = {
+            'type': 'unknown',
+            'languages': [],
+            'frontend': None,
+            'backend': None,
+            'backend_lang': None,
+        }
+
+        # Frontend
+        for candidate in ['.', 'frontend', 'client', 'web', 'app', 'ui']:
+            base = repo_dir if candidate == '.' else os.path.join(repo_dir, candidate)
+            if not os.path.isdir(base):
+                continue
+            pkg_path = os.path.join(base, 'package.json')
+            if os.path.exists(pkg_path):
+                try:
+                    with open(pkg_path) as f:
+                        pkg = json.load(f)
+                    deps = {**pkg.get('dependencies', {}), **pkg.get('devDependencies', {})}
+                    if any(fw in deps for fw in ['react', 'vue', 'next', 'svelte', 'angular', 'vite', 'nuxt']):
+                        detection['frontend'] = candidate
+                        if 'node' not in detection['languages']:
+                            detection['languages'].append('node')
+                        break
+                except Exception:
+                    pass
+            if candidate == '.' and os.path.exists(os.path.join(base, 'index.html')):
+                if not detection['frontend']:
+                    detection['frontend'] = '.'
+                    if 'static' not in detection['languages']:
+                        detection['languages'].append('static')
+
+        # Backend
+        for candidate in ['backend', 'server', 'api', '.', 'src']:
+            base = repo_dir if candidate == '.' else os.path.join(repo_dir, candidate)
+            if not os.path.isdir(base):
+                continue
+            if candidate == detection.get('frontend'):
+                continue
+
+            for lang, files in self.LANG_PATTERNS.items():
+                if lang in ('node', 'static'):
+                    continue
+                for marker in files:
+                    if '*' in marker:
+                        if list(Path(base).glob(marker)):
+                            detection['backend'] = candidate
+                            detection['backend_lang'] = lang
+                            if lang not in detection['languages']:
+                                detection['languages'].append(lang)
+                            break
+                    else:
+                        if os.path.exists(os.path.join(base, marker)):
+                            detection['backend'] = candidate
+                            detection['backend_lang'] = lang
+                            if lang not in detection['languages']:
+                                detection['languages'].append(lang)
+                            break
+                if detection['backend']:
+                    break
+            if detection['backend']:
+                break
+
+            # Node backend
+            pkg_path = os.path.join(base, 'package.json')
+            if os.path.exists(pkg_path):
+                try:
+                    with open(pkg_path) as f:
+                        pkg = json.load(f)
+                    deps = {**pkg.get('dependencies', {}), **pkg.get('devDependencies', {})}
+                    if any(fw in deps for fw in ['express', 'koa', 'fastify', 'nest']):
+                        detection['backend'] = candidate
+                        detection['backend_lang'] = 'node'
+                        if 'node' not in detection['languages']:
+                            detection['languages'].append('node')
+                        break
+                except Exception:
+                    pass
+
+        if detection['frontend'] and detection['backend']:
+            detection['type'] = 'fullstack'
+        elif detection['frontend']:
+            detection['type'] = 'frontend'
+        elif detection['backend']:
+            detection['type'] = 'backend'
+        elif os.path.exists(os.path.join(repo_dir, 'package.json')):
+            detection['frontend'] = '.'
+            detection['type'] = 'frontend'
+            detection['languages'].append('node')
+
+        return detection
+
+    # ============================================
+    # Build Frontend (with cache + timeout fix)
+    # ============================================
+    def _build_frontend(self, repo_dir, subdir, log):
+        try:
+            path = repo_dir if subdir == '.' else os.path.join(repo_dir, subdir)
+
+            if os.path.exists(os.path.join(path, 'package.json')):
+                log(f"   📦 npm install ({subdir})")
+
+                # ⭐ ALWAYS use install (not ci) — faster + cache-friendly
+                if os.path.exists(os.path.join(path, 'pnpm-lock.yaml')):
+                    install_cmd, build_cmd = 'pnpm install', 'pnpm run build'
+                elif os.path.exists(os.path.join(path, 'yarn.lock')):
+                    install_cmd, build_cmd = 'yarn install', 'yarn build'
+                else:
+                    # ⭐ npm install (not ci) — reuses cache, faster on 8GB
+                    install_cmd, build_cmd = 'npm install --no-audit --no-fund --prefer-offline', 'npm run build'
+
+                # ⭐ Check cache first
+                repo_key = hashlib.md5(path.encode()).hexdigest()[:12]
+                cache_dir = os.path.join(self.cache_root, repo_key, 'node_modules')
+
+                use_cache = False
+                if os.path.exists(cache_dir) and os.path.exists(os.path.join(cache_dir, '.complete')):
+                    log(f"   ⚡ Cache hit — copying node_modules")
+                    try:
+                        dest = os.path.join(path, 'node_modules')
+                        if os.path.exists(dest):
+                            shutil.rmtree(dest, ignore_errors=True)
+                        shutil.copytree(cache_dir, dest)
+                        use_cache = True
+                        log(f"   ✅ Cache restored")
+                    except Exception as e:
+                        log(f"   ⚠️ Cache copy failed: {str(e)[:80]}")
+
+                # Install (if no cache)
+                if not use_cache:
+                    log(f"   ⏳ Running: {install_cmd} (timeout: 30min)")
+                    start = time.time()
+                    result = subprocess.run(
+                        install_cmd, cwd=path, shell=True,
+                        capture_output=True, text=True, timeout=self.TIMEOUT_INSTALL,
+                    )
+                    elapsed = time.time() - start
+                    log(f"   ⏱️ Install took {elapsed:.1f}s")
+
+                    if result.returncode != 0:
+                        return {'success': False, 'error': f'{install_cmd} failed: {result.stderr[:200]}'}
+
+                    # ⭐ Save to cache
+                    try:
+                        os.makedirs(os.path.dirname(cache_dir), exist_ok=True)
+                        if os.path.exists(cache_dir):
+                            shutil.rmtree(cache_dir, ignore_errors=True)
+                        node_modules = os.path.join(path, 'node_modules')
+                        if os.path.exists(node_modules):
+                            shutil.copytree(node_modules, cache_dir)
+                            with open(os.path.join(cache_dir, '.complete'), 'w') as f:
+                                f.write('ok')
+                            log(f"   ✅ Cached node_modules")
+                    except Exception as e:
+                        log(f"   ⚠️ Cache save failed: {str(e)[:80]}")
+
+                # Build
+                log(f"   🔨 Building (timeout: 30min)...")
+                start = time.time()
+                subprocess.run(
+                    f'{build_cmd} 2>&1 || true', cwd=path, shell=True,
+                    capture_output=True, timeout=self.TIMEOUT_BUILD,
+                )
+                elapsed = time.time() - start
+                log(f"   ⏱️ Build took {elapsed:.1f}s")
+
+                for build_sub in ['dist', 'build', 'out', '.next', 'public']:
+                    candidate = os.path.join(path, build_sub)
+                    if os.path.exists(candidate):
+                        log(f"   ✅ Built to {build_sub}/")
+                        return {'success': True, 'build_path': candidate}
+
+                return {'success': True, 'build_path': path}
+
+            if os.path.exists(os.path.join(path, 'index.html')):
+                log(f"   📄 Static HTML")
+                return {'success': True, 'build_path': path}
+
+            return {'success': False, 'error': 'No package.json or index.html'}
+
+        except subprocess.TimeoutExpired:
+            return {'success': False, 'error': f'Build timed out after {self.TIMEOUT_BUILD}s'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)[:200]}
+
+    # ============================================
+    # Build Backend (with venv timeout fix)
+    # ============================================
+    def _build_backend(self, repo_dir, subdir, lang, log):
+        try:
+            path = repo_dir if subdir == '.' else os.path.join(repo_dir, subdir)
+
+            if lang == 'python':
+                log(f"   🐍 Python deps...")
+                if os.path.exists(os.path.join(path, 'requirements.txt')):
+                    venv_path = os.path.join(path, '.venv')
+                    if not os.path.exists(venv_path):
+                        log(f"   ⏳ Creating venv (timeout: 10min)...")
+                        start = time.time()
+                        try:
+                            subprocess.run('python -m venv .venv', cwd=path, shell=True,
+                                           capture_output=True, timeout=self.TIMEOUT_VENV)
+                            log(f"   ⏱️ venv took {time.time()-start:.1f}s")
+                        except subprocess.TimeoutExpired:
+                            log(f"   ⚠️ venv timeout — trying without venv")
+                            # Fallback: install globally
+                            pass
+
+                    if os.name == 'nt':
+                        pip = os.path.join(venv_path, 'Scripts', 'pip.exe')
+                    else:
+                        pip = os.path.join(venv_path, 'bin', 'pip')
+                    if not os.path.exists(pip):
+                        pip = 'pip'
+
+                    log(f"   ⏳ Installing pip deps (timeout: 15min)...")
+                    start = time.time()
+                    try:
+                        subprocess.run(f'"{pip}" install -r requirements.txt', cwd=path, shell=True,
+                                       capture_output=True, timeout=self.TIMEOUT_PIP)
+                        log(f"   ⏱️ pip install took {time.time()-start:.1f}s")
+                    except subprocess.TimeoutExpired:
+                        log(f"   ⚠️ pip install timeout")
+                return {'success': True, 'runtime': 'python', 'path': path}
+
+            if lang == 'node':
+                log(f"   📦 Node deps...")
+                install_cmd = 'npm install --no-audit --no-fund --prefer-offline'
+                try:
+                    subprocess.run(install_cmd, cwd=path, shell=True, capture_output=True,
+                                   timeout=self.TIMEOUT_INSTALL)
+                except subprocess.TimeoutExpired:
+                    log(f"   ⚠️ npm install timeout")
+                return {'success': True, 'runtime': 'node', 'path': path}
+
+            if lang == 'go':
+                log(f"   🔷 Go build...")
+                subprocess.run('go mod download', cwd=path, shell=True, capture_output=True, timeout=900)
+                subprocess.run('go build -o app .', cwd=path, shell=True, capture_output=True, timeout=900)
+                return {'success': True, 'runtime': 'go', 'path': path}
+
+            if lang == 'rust':
+                log(f"   🦀 Cargo build...")
+                subprocess.run('cargo build --release', cwd=path, shell=True, capture_output=True, timeout=1800)
+                return {'success': True, 'runtime': 'rust', 'path': path}
+
+            if lang == 'php':
+                log(f"   🐘 Composer...")
+                subprocess.run('composer install --no-dev', cwd=path, shell=True, capture_output=True, timeout=900)
+                return {'success': True, 'runtime': 'php', 'path': path}
+
+            if lang == 'java':
+                log(f"   ☕ Maven...")
+                subprocess.run('mvn package -DskipTests', cwd=path, shell=True, capture_output=True, timeout=1800)
+                return {'success': True, 'runtime': 'java', 'path': path}
+
+            if lang == 'ruby':
+                log(f"   💎 Bundle...")
+                subprocess.run('bundle install', cwd=path, shell=True, capture_output=True, timeout=900)
+                return {'success': True, 'runtime': 'ruby', 'path': path}
+
+            return {'success': False, 'error': f'Unsupported: {lang}'}
+
+        except Exception as e:
+            return {'success': False, 'error': str(e)[:200]}
+
+    # ============================================
+    # Start Backend
+    # ============================================
+    def _start_backend(self, deploy_id, deploy_dir, repo_dir, subdir, lang, port, log):
+        try:
+            path = repo_dir if subdir == '.' else os.path.join(repo_dir, subdir)
+            log_file = os.path.join(deploy_dir, 'backend.log')
+
+            cmd = self._detect_start_cmd(path, lang, port)
+            log(f"   ▶️  Start: {cmd}")
+
+            env = os.environ.copy()
+            env['PORT'] = str(port)
+
+            if os.name == 'nt':
+                proc = subprocess.Popen(
+                    cmd, cwd=path, shell=True,
+                    stdout=open(log_file, 'w'), stderr=subprocess.STDOUT,
+                    env=env, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                )
+            else:
+                proc = subprocess.Popen(
+                    cmd, cwd=path, shell=True,
+                    stdout=open(log_file, 'w'), stderr=subprocess.STDOUT,
+                    env=env, start_new_session=True,
+                )
+
+            log(f"   ✅ Backend started")
+            time.sleep(2)
+            return proc
+        except Exception as e:
+            log(f"   ⚠️ Backend failed: {str(e)[:150]}")
+            return None
+
+    def _detect_start_cmd(self, path, lang, port):
+        if lang == 'python':
+            if os.path.exists(os.path.join(path, 'app.py')):
+                return 'python app.py'
+            if os.path.exists(os.path.join(path, 'main.py')):
+                return 'python main.py'
+            if os.path.exists(os.path.join(path, 'manage.py')):
+                return f'python manage.py runserver 0.0.0.0:{port}'
+            return 'python app.py'
+        if lang == 'node':
+            return 'npm start'
+        if lang == 'go':
+            return './app'
+        if lang == 'rust':
+            return 'cargo run --release'
+        if lang == 'php':
+            return f'php -S 0.0.0.0:{port}'
+        return 'echo "no start command"'
+
+    # ============================================
+    # Start Proxy
+    # ============================================
+    def _start_proxy(self, deploy_id, deploy_dir, frontend_ready, frontend_path,
+                     backend_ready, backend_port, proxy_port, log):
+        try:
+            proxy_script = os.path.join(deploy_dir, 'proxy.py')
+            frontend_path_safe = (frontend_path or '').replace('\\', '/')
+            backend_port_str = str(backend_port) if backend_ready else '0'
+
+            script = f'''"""
+Auto-generated reverse proxy
+"""
+import http.server
+import socketserver
+import urllib.request
+import urllib.parse
+import os
+import posixpath
+
+PROXY_PORT = {proxy_port}
+FRONTEND_PATH = r"{frontend_path_safe}"
+BACKEND_PORT = {backend_port_str}
+
+
+class ProxyHandler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def _proxy_backend(self):
+        try:
+            url = f'http://127.0.0.1:{{BACKEND_PORT}}{{self.path[4:]}}'
+            body = None
+            if self.command in ('POST', 'PUT', 'PATCH'):
+                length = int(self.headers.get('Content-Length', 0))
+                body = self.rfile.read(length) if length else None
+
+            req = urllib.request.Request(url, data=body, method=self.command)
+            for k, v in self.headers.items():
+                if k.lower() not in ('host', 'content-length'):
+                    req.add_header(k, v)
+
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                self.send_response(resp.status)
+                for k, v in resp.headers.items():
+                    if k.lower() not in ('transfer-encoding', 'connection'):
+                        self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(resp.read())
+        except Exception as e:
+            self.send_error(502, str(e)[:200])
+
+    def _serve_frontend(self):
+        if not FRONTEND_PATH or not os.path.exists(FRONTEND_PATH):
+            self.send_error(404, 'Frontend not built')
+            return
+        path = self.translate_path(self.path)
+        if not os.path.exists(path) or os.path.isdir(path):
+            index = os.path.join(FRONTEND_PATH, 'index.html')
+            if os.path.exists(index):
+                self.path = '/index.html'
+                path = index
+            else:
+                self.send_error(404)
+                return
+        return super().do_GET()
+
+    def do_GET(self):
+        if self.path == '/_health':
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'OK')
+            return
+        if self.path.startswith('/api/') and BACKEND_PORT:
+            return self._proxy_backend()
+        return self._serve_frontend()
+
+    def do_POST(self):
+        if self.path.startswith('/api/') and BACKEND_PORT:
+            return self._proxy_backend()
+        self.send_error(404)
+
+    def do_PUT(self):
+        if self.path.startswith('/api/') and BACKEND_PORT:
+            return self._proxy_backend()
+        self.send_error(404)
+
+    def do_DELETE(self):
+        if self.path.startswith('/api/') and BACKEND_PORT:
+            return self._proxy_backend()
+        self.send_error(404)
+
+    def translate_path(self, path):
+        if not FRONTEND_PATH:
+            return ''
+        path = path.split('?', 1)[0].split('#', 1)[0]
+        path = posixpath.normpath(urllib.parse.unquote(path))
+        words = [w for w in path.split('/') if w]
+        result = FRONTEND_PATH
+        for word in words:
+            if word in (os.curdir, os.pardir):
+                continue
+            result = os.path.join(result, word)
+        return result
+
+
+with socketserver.ThreadingTCPServer(('0.0.0.0', PROXY_PORT), ProxyHandler) as httpd:
+    print(f'Proxy on port {{PROXY_PORT}}')
+    httpd.serve_forever()
+'''
+            with open(proxy_script, 'w') as f:
+                f.write(script)
+
+            log_file = os.path.join(deploy_dir, 'proxy.log')
+            if os.name == 'nt':
+                proc = subprocess.Popen(
+                    [sys.executable, proxy_script],
+                    stdout=open(log_file, 'w'), stderr=subprocess.STDOUT,
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                )
+            else:
+                proc = subprocess.Popen(
+                    [sys.executable, proxy_script],
+                    stdout=open(log_file, 'w'), stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            log(f"   ✅ Proxy started (port {proxy_port})")
+            time.sleep(1)
+            return proc
+        except Exception as e:
+            log(f"   ❌ Proxy failed: {str(e)[:150]}")
+            return None
+
+    # ============================================
+    # PUBLIC URL — Cloudflared with retry + LAN fallback
+    # ============================================
+    def _expose_url(self, deploy_id, proxy_port, log):
+        # 1. Cloudflared
+        cloudflared = shutil.which('cloudflared') or os.getenv('CLOUDFLARED_PATH')
+
+        if cloudflared:
+            for attempt in range(1, 3):
+                log(f"   🌐 Cloudflare Tunnel (attempt {attempt}/2)...")
+                try:
+                    log_file = os.path.join(self.deploy_root, deploy_id, f'tunnel-{attempt}.log')
+
+                    if os.path.exists(log_file):
+                        try:
+                            os.remove(log_file)
+                        except Exception:
+                            pass
+
+                    proc = subprocess.Popen(
+                        [cloudflared, 'tunnel', '--url', f'http://localhost:{proxy_port}',
+                         '--no-autoupdate'],
+                        stdout=open(log_file, 'w'), stderr=subprocess.STDOUT,
+                    )
+
+                    log(f"   ⏳ Waiting for tunnel URL (max 30s)...")
+                    for i in range(30):
+                        time.sleep(1)
+                        if os.path.exists(log_file):
+                            with open(log_file) as f:
+                                content = f.read()
+
+                            match = re.search(r'https://[a-z0-9\-]+\.trycloudflare\.com', content)
+                            if match:
+                                url = match.group(0)
+                                log(f"   ✅ Public URL: {url}")
+                                self._tunnel_procs[deploy_id] = proc
+                                return url
+
+                            content_lower = content.lower()
+                            if i >= 5 and ('error' in content_lower or 'failed' in content_lower):
+                                log(f"   ⚠️ Tunnel error detected")
+                                break
+
+                    log(f"   ⚠️ Attempt {attempt} timeout (30s)")
+
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+
+                except Exception as e:
+                    log(f"   ⚠️ Attempt {attempt}: {str(e)[:120]}")
+
+            log(f"   ⚠️ Cloudflared failed after 2 attempts")
+        else:
+            log(f"   ⚠️ cloudflared not installed")
+            log(f"   💡 Install: winget install --id Cloudflare.cloudflared")
+
+        # 2. Ngrok fallback
+        ngrok = shutil.which('ngrok')
+        if ngrok:
+            log("   🌐 Trying Ngrok...")
+            try:
+                subprocess.Popen([ngrok, 'http', str(proxy_port)],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                time.sleep(5)
+                import urllib.request
+                with urllib.request.urlopen('http://localhost:4040/api/tunnels', timeout=5) as r:
+                    data = json.loads(r.read())
+                if data.get('tunnels'):
+                    url = data['tunnels'][0]['public_url']
+                    log(f"   ✅ Ngrok URL: {url}")
+                    return url
+            except Exception as e:
+                log(f"   ⚠️ Ngrok: {str(e)[:100]}")
+
+        # 3. LAN IP
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(('8.8.8.8', 80))
+            lan_ip = s.getsockname()[0]
+            s.close()
+
+            if lan_ip and not lan_ip.startswith('127.'):
+                lan_url = f'http://{lan_ip}:{proxy_port}'
+                log(f"   📡 Same WiFi URL: {lan_url}")
+                log(f"   💡 Any device on same WiFi can access this")
+                return lan_url
+        except Exception:
+            pass
+
+        # 4. Localhost
+        local_url = f'http://localhost:{proxy_port}'
+        log(f"   ⚠️ Local only: {local_url}")
+        return local_url
+
+    # ============================================
+    # Helpers
+    # ============================================
+    def _generate_deploy_id(self, owner, repo):
+        slug = re.sub(r'[^a-z0-9\-]', '-', f"{owner}-{repo}".lower())[:40]
+        short_hash = hashlib.md5(f"{owner}/{repo}{time.time()}".encode()).hexdigest()[:6]
+        return f"{slug}-{short_hash}"
+
+    def _find_free_port(self):
+        for port in range(self.port_start, self.port_start + 5000):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                try:
+                    s.bind(('127.0.0.1', port))
+                    return port
+                except OSError:
+                    continue
+        raise RuntimeError('No free port')
+
+    def _inject_token(self, repo_url):
+        token = os.getenv('GITHUB_TOKEN')
+        if token and 'github.com' in repo_url:
+            return repo_url.replace('https://github.com/', f'https://{token}@github.com/')
+        return repo_url
+
+    def _save_to_registry(self, deploy_id, data):
+        registry = self.list_deployments()
+        registry[deploy_id] = data
+        self._write_registry(registry)
+
+    def _write_registry(self, registry):
+        try:
+            with open(self.registry_file, 'w') as f:
+                json.dump(registry, f, indent=2)
+        except Exception as e:
+            print(f"[SELF-HOST] Registry write error: {e}")
+
+    def cleanup_stale(self, max_age_seconds=86400):
+        try:
+            registry = self.list_deployments()
+            now = time.time()
+            removed = []
+            for deploy_id, data in list(registry.items()):
+                age = now - data.get('deployed_at', now)
+                if age > max_age_seconds:
+                    self.delete_deployment(deploy_id)
+                    removed.append(deploy_id)
+            return {'success': True, 'removed': removed}
+        except Exception as e:
+            return {'success': False, 'error': str(e)[:200]}

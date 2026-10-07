@@ -1,0 +1,646 @@
+"""
+Smart DevOps Backend — Agentic AI Edition
+==========================================
+Full agentic AI system with:
+- Multi-agent orchestration
+- LLM-powered routing
+- Real-time agent logs
+- Auto-fix integration
+- DevOps REST API
+"""
+
+import os
+import sys
+import logging
+import re
+from datetime import datetime
+from flask import Flask, jsonify, request
+from flask_cors import CORS
+from flask_socketio import SocketIO, emit, join_room, leave_room
+from dotenv import load_dotenv
+
+# ============================================================
+# Use gevent for better WebSocket support
+# ============================================================
+try:
+    from gevent import monkey
+    monkey.patch_all(ssl=False)
+    async_mode = 'gevent'
+    print("✅ Using gevent for async mode")
+except ImportError:
+    async_mode = 'threading'
+    print("⚠️  Using threading mode")
+
+# Setup paths
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+load_dotenv()
+
+# ============================================================
+# Flask App Initialization
+# ============================================================
+app = Flask(__name__)
+
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key')
+app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'jwt-secret-key')
+app.config['MONGO_URI'] = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
+app.config['MONGODB_DB'] = os.getenv('MONGODB_DB', 'smart_devops')
+app.config['MAX_CONTENT_LENGTH'] = int(os.getenv('MAX_CONTENT_LENGTH', 104857600))
+app.config['UPLOAD_FOLDER'] = os.getenv('UPLOAD_FOLDER', './uploads')
+
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
+# ============================================================
+# CORS & WebSocket
+# ============================================================
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+socketio = SocketIO(
+    app,
+    cors_allowed_origins="*",
+    async_mode=async_mode,
+    logger=False,
+    engineio_logger=False,
+    ping_timeout=60,
+    ping_interval=25,
+)
+
+# ============================================================
+# ⭐ CONNECT SOCKET.IO TO AGENTS (for real-time logs)
+# ============================================================
+try:
+    from agents.base_agent import set_socketio
+    set_socketio(socketio)
+    print("✅ Socket.IO connected to agents (real-time logs enabled)")
+except ImportError as e:
+    print(f"⚠️  Could not connect socket to agents: {e}")
+
+
+# ============================================================
+# Helper: Stream logs to terminal
+# ============================================================
+def stream_terminal_log(message, log_type="info", sid=None):
+    payload = {
+        'log': message,
+        'message': message,
+        'type': log_type,
+        'level': log_type,
+        'timestamp': datetime.now().strftime("%H:%M:%S")
+    }
+    if sid:
+        socketio.emit('live_log', payload, room=sid)
+    else:
+        socketio.emit('live_log', payload)
+
+
+# ============================================================
+# Database Connection
+# ============================================================
+db = None
+db_connection = None
+
+try:
+    from database.connection import db_connection
+    if db_connection.init_app(app):
+        print("✅ Database connected successfully!")
+        db = db_connection.get_db()
+    else:
+        print("❌ Database connection failed!")
+except ImportError:
+    print("⚠️  database.connection not found – using dummy connection.")
+    class DummyDB:
+        def init_app(self, app): return False
+        def get_db(self): return None
+        def is_connected(self): return False
+        def get_stats(self): return {'status': 'disconnected', 'collections_list': []}
+    db_connection = DummyDB()
+    db = None
+
+
+# ============================================================
+# Logging
+# ============================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# Dynamic Blueprint Registration
+# ============================================================
+blueprint_defs = [
+    ('api.auth', 'auth_bp', '/api/auth'),
+    ('api.assistant', 'assistant_bp', '/api/assistant'),
+    ('api.upload', 'upload_bp', '/api/upload'),
+    ('api.pipelines', 'pipelines_bp', '/api/pipelines'),
+    ('api.infrastructure', 'infrastructure_bp', '/api/infrastructure'),
+    ('api.monitoring', 'monitoring_bp', '/api/monitoring'),
+    ('api.training', 'training_bp', '/api/training'),
+    ('api.settings', 'settings_bp', '/api/settings'),
+    ('api.devops', 'devops_bp', '/api/devops'),  # ⭐ NEW
+]
+
+blueprints_loaded = []
+for module_name, bp_name, url_prefix in blueprint_defs:
+    try:
+        module = __import__(module_name, fromlist=[bp_name])
+        bp = getattr(module, bp_name)
+        app.register_blueprint(bp, url_prefix=url_prefix)
+        blueprints_loaded.append(url_prefix)
+        logger.info(f"✅ Registered {url_prefix}")
+    except (ImportError, AttributeError) as e:
+        logger.warning(f"⚠️  Could not load {module_name}: {e}")
+
+
+# ============================================================
+# Helper Functions (legacy — kept for compatibility)
+# ============================================================
+def detect_intent(message: str) -> dict:
+    """Legacy intent detection (kept for fallback)."""
+    text = message.lower().strip()
+
+    deploy_words = ['deploy', 'release', 'publish', 'ship', 'go live']
+    pipeline_words = ['pipeline', 'ci/cd', 'cicd', 'build pipeline']
+    fix_words = ['fix', 'repair', 'debug', 'error', 'broken', 'heal']
+    scan_words = ['scan', 'security', 'vulnerability', 'audit']
+    scale_words = ['scale', 'replica', 'instance', 'more pods']
+    monitor_words = ['monitor', 'logs', 'metrics', 'health', 'status']
+
+    if any(w in text for w in deploy_words):
+        return {'action': 'deploy', 'target': 'fullstack', 'params': {}}
+    if any(w in text for w in pipeline_words):
+        return {'action': 'pipeline', 'target': 'fullstack', 'params': {}}
+    if any(w in text for w in fix_words):
+        return {'action': 'fix', 'target': 'code', 'params': {}}
+    if any(w in text for w in scan_words):
+        return {'action': 'scan', 'target': 'code', 'params': {}}
+    if any(w in text for w in scale_words):
+        return {'action': 'scale', 'target': 'infra', 'params': {'replicas': 5}}
+    if any(w in text for w in monitor_words):
+        return {'action': 'monitor', 'target': 'infra', 'params': {}}
+
+    return {'action': 'none', 'target': None, 'params': {}}
+
+
+def build_execution(intent: dict, status: str = 'running', progress: int = 10) -> dict:
+    """Build execution object for frontend."""
+    action = intent.get('action', 'task')
+    step_map = {
+        'deploy': ['Analyze repo', 'Choose provider', 'Clone repo', 'Deploy', 'Health check'],
+        'pipeline': ['Analyze repo', 'Generate YAML', 'Commit workflow', 'Monitor'],
+        'fix': ['Analyze error', 'Find files', 'Generate fix', 'Apply fix', 'Verify'],
+        'scan': ['Fetch files', 'Scan secrets', 'Scan vulnerabilities', 'Analyze'],
+        'monitor': ['Fetch metrics', 'Analyze', 'Ready'],
+        'scale': ['Calculate resources', 'Apply scaling', 'Verify'],
+        'none': ['Process'],
+    }
+    steps = step_map.get(action, ['Process'])
+    return {
+        'status': status,
+        'progress': progress,
+        'duration': '0s',
+        'steps': [{'name': s, 'status': 'pending'} for s in steps]
+    }
+
+
+def extract_github_url(text: str) -> str:
+    m = re.search(r'https?://github\.com/[\w\-\.]+/[\w\-\.]+', text)
+    return m.group(0) if m else None
+
+
+def extract_provider(text: str) -> str:
+    text_lower = text.lower()
+    for provider in ['vercel', 'render', 'kaniko', 'buildah', 'railway', 'netlify']:
+        if provider in text_lower:
+            return provider
+    return None
+
+
+# ============================================================
+# ⭐ Global Orchestrator instance
+# ============================================================
+_orchestrator = None
+
+
+def get_orchestrator():
+    """Lazy-init orchestrator."""
+    global _orchestrator
+    if _orchestrator is None:
+        try:
+            from agents.orchestrator import Orchestrator
+            _orchestrator = Orchestrator()
+            print("✅ Orchestrator initialized")
+        except Exception as e:
+            print(f"❌ Failed to init orchestrator: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    return _orchestrator
+
+
+# ============================================================
+# WebSocket Events
+# ============================================================
+@socketio.on('connect')
+def handle_connect():
+    logger.info(f"✅ Client connected: {request.sid}")
+    join_room(request.sid)
+    emit('connected', {
+        'message': 'Connected to Smart DevOps Engine',
+        'sid': request.sid,
+        'timestamp': datetime.now().isoformat()
+    })
+    stream_terminal_log("🤖 Agent Socket Stream Online. Ready for commands...", "success", sid=request.sid)
+
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    logger.info(f"❌ Client disconnected: {request.sid}")
+    leave_room(request.sid)
+
+
+# ============================================================
+# ⭐ MAIN CHAT HANDLER — Agentic AI
+# ============================================================
+@socketio.on('chat')
+def handle_chat(data):
+    """Handle chat — routes through Orchestrator (agentic AI)."""
+    sid = request.sid
+
+    try:
+        message = data.get('message', '')
+        user_id = data.get('user_id', 'anonymous')
+        project_id = data.get('project_id', 'default_project')
+        project_name = data.get('project_name', 'Unknown Project')
+        source = data.get('source', 'unknown')
+
+        logger.info(f"💬 Chat received: {message[:80]}")
+
+        stream_terminal_log(f"💬 Received: '{message[:60]}'", "info", sid=sid)
+
+        # ============================================
+        # ⭐ ROUTE THROUGH ORCHESTRATOR
+        # ============================================
+        orchestrator = get_orchestrator()
+
+        if not orchestrator:
+            emit('chat_response', {
+                'message': "⚠️ Agentic AI system is offline. Please check backend logs.",
+                'timestamp': datetime.now().isoformat(),
+            }, room=sid)
+            return
+
+        stream_terminal_log("🧠 Orchestrator processing (agentic AI)...", "info", sid=sid)
+
+        result = orchestrator.process(
+            {
+                'action': 'chat',
+                'query': message,
+                'project_id': project_id,
+                'project_name': project_name,
+            },
+            context={
+                'user_id': user_id,
+                'sid': sid,
+                'project_id': project_id,
+                'project_name': project_name,
+                'source': source,
+            }
+        )
+
+        logger.info(f"✅ Orchestrator result: {str(result)[:200]}")
+
+        # ============================================
+        # Build response
+        # ============================================
+        if isinstance(result, dict):
+            reply_text = result.get('response') or result.get('message') or str(result)
+
+            exec_data = result.get('execution')
+            if not exec_data:
+                intent = detect_intent(message)
+                exec_data = build_execution(intent, status='completed', progress=100)
+                exec_data['duration'] = '0s'
+                for s in exec_data['steps']:
+                    s['status'] = 'completed'
+                    s['duration'] = '-'
+
+            if result.get('live_url'):
+                exec_data['liveUrl'] = result['live_url']
+
+        else:
+            reply_text = str(result)
+            exec_data = None
+
+        emit('chat_response', {
+            'message': reply_text,
+            'execution': exec_data,
+            'intent': detect_intent(message),
+            'result_type': result.get('type') if isinstance(result, dict) else None,
+            'timestamp': datetime.now().isoformat(),
+        }, room=sid)
+
+        # Emit deploy_complete if it was a deploy
+        if isinstance(result, dict) and result.get('type') == 'deploy' and result.get('success'):
+            emit('deploy_complete', {
+                'deployId': f"deploy-{int(datetime.now().timestamp())}",
+                'type': 'fullstack',
+                'liveUrl': result.get('live_url'),
+                'buildMethod': result.get('provider', 'unknown'),
+                'fixesApplied': 0,
+                'duration': result.get('duration', '0s'),
+                'steps': exec_data.get('steps', []) if exec_data else [],
+                'summary': f"Deployed via {result.get('provider', 'unknown')}",
+                'timestamp': datetime.now().isoformat(),
+            }, room=sid)
+
+        stream_terminal_log("✅ Response sent to frontend", "success", sid=sid)
+
+    except Exception as e:
+        logger.error(f"❌ Chat error: {e}")
+        import traceback
+        traceback.print_exc()
+        stream_terminal_log(f"❌ Error: {str(e)[:150]}", "error", sid=sid)
+        emit('chat_response', {
+            'error': str(e),
+            'timestamp': datetime.now().isoformat(),
+        }, room=sid)
+
+
+# ============================================================
+# Quick Actions (buttons)
+# ============================================================
+@socketio.on('devops_action')
+def handle_quick_action(data):
+    """Handle quick action buttons — routes through Orchestrator."""
+    sid = request.sid
+    action_type = data.get('action')
+    project_id = data.get('project_id', 'default_project')
+    project_name = data.get('project_name', 'Unknown Project')
+    repo_url = data.get('repo_url') or data.get('repoUrl')
+
+    stream_terminal_log(f"⚡ Action: [{action_type.upper()}] → {project_name}", "info", sid=sid)
+
+    orchestrator = get_orchestrator()
+    if not orchestrator:
+        emit('action_response', {
+            'status': 'failed',
+            'action': action_type,
+            'error': 'Orchestrator not available',
+        }, room=sid)
+        return
+
+    try:
+        # ⭐ Build payload
+        payload = {
+            'action': action_type,
+            'repo_url': repo_url,
+            'project_id': project_id,
+            'project_name': project_name,
+            'data': data,
+        }
+
+        if action_type == 'deploy':
+            payload['fullstack'] = True
+            payload['provider'] = data.get('provider', 'auto')
+            payload['deploy_method'] = data.get('deploy_method', 'self-host')
+
+        elif action_type == 'pipeline':
+            payload['deploy_method'] = data.get('deploy_method', 'self-host')
+            payload['max_fix_attempts'] = data.get('max_fix_attempts', 50)
+
+        elif action_type == 'fix':
+            payload['error_message'] = data.get('error_message', '')
+            payload['error_logs'] = data.get('error_logs', '')
+
+        elif action_type == 'scan':
+            payload['scan_type'] = data.get('scan_type', 'full')
+
+        elif action_type == 'monitor':
+            payload['url'] = data.get('url') or repo_url
+
+        elif action_type == 'fix_code':
+            payload['code'] = data.get('code', '')
+            payload['error'] = data.get('error', '')
+
+        result = orchestrator.process(
+            payload,
+            context={
+                'sid': sid,
+                'project_id': project_id,
+                'project_name': project_name,
+                'repo_url': repo_url,
+            }
+        )
+
+        success = isinstance(result, dict) and result.get('success', True)
+
+        emit('action_response', {
+            'status': 'success' if success else 'failed',
+            'action': action_type,
+            'result': result,
+            'message': result.get('response', '') if isinstance(result, dict) else '',
+            'timestamp': datetime.now().isoformat(),
+        }, room=sid)
+
+        if isinstance(result, dict) and result.get('response'):
+            emit('chat_response', {
+                'message': result['response'],
+                'execution': result.get('execution'),
+                'timestamp': datetime.now().isoformat(),
+            }, room=sid)
+
+    except Exception as e:
+        logger.error(f"Action error: {e}")
+        import traceback
+        traceback.print_exc()
+        stream_terminal_log(f"❌ Action failed: {str(e)[:150]}", "error", sid=sid)
+        emit('action_response', {
+            'status': 'failed',
+            'action': action_type,
+            'error': str(e),
+        }, room=sid)
+
+
+# ============================================================
+# ⭐ Deploy Start (from Deploy button)
+# ============================================================
+@socketio.on('deploy_start')
+def handle_deploy_start(data):
+    """Handle deploy from modal — routes through Orchestrator."""
+    sid = request.sid
+    project_id = data.get('projectId') or data.get('project_id', 'default')
+    project_name = data.get('projectName') or data.get('project_name', 'Unknown')
+    deploy_type_pref = data.get('deployType', 'auto')
+    provider = data.get('provider', 'auto')
+    repo_url = data.get('repoUrl') or data.get('repo_url') or ''
+    command = data.get('command')  # ⭐ Full command from frontend
+
+    stream_terminal_log(f"🚀 Deploy started: {project_name}", "info", sid=sid)
+    stream_terminal_log(f"🎯 Type: {deploy_type_pref} | Method: {provider}", "info", sid)
+
+    if not repo_url or not repo_url.startswith('http'):
+        stream_terminal_log("⚠️  No GitHub repo URL provided", "warning", sid=sid)
+        emit('deploy_complete', {
+            'error': 'No GitHub repo URL provided',
+            'timestamp': datetime.now().isoformat(),
+        }, room=sid)
+        return
+
+    orchestrator = get_orchestrator()
+    if not orchestrator:
+        emit('deploy_complete', {
+            'error': 'Orchestrator not available',
+        }, room=sid)
+        return
+
+    try:
+        # ⭐ Pass command + structured fields
+        result = orchestrator.process(
+            {
+                'action': 'deploy',
+                'repo_url': repo_url,
+                'project_name': project_name,
+                'provider': None if provider in ('auto', '') else provider,
+                'deploy_type': deploy_type_pref,
+                'command': command,
+                'fullstack': deploy_type_pref in ('auto', 'fullstack'),
+            },
+            context={'sid': sid, 'project_id': project_id, 'project_name': project_name}
+        )
+
+        if result.get('success'):
+            live_url = result.get('live_url') or result.get('url')
+            stream_terminal_log(f"🎉 Live at: {live_url}", "success", sid=sid)
+
+            emit('deploy_complete', {
+                'deployId': f"deploy-{int(datetime.now().timestamp())}",
+                'type': deploy_type_pref,
+                'liveUrl': live_url,
+                'buildMethod': result.get('provider', 'unknown'),
+                'fixesApplied': 0,
+                'duration': result.get('duration', '0s'),
+                'steps': [],
+                'summary': f"Deployed via {result.get('provider', 'unknown')}",
+                'timestamp': datetime.now().isoformat(),
+            }, room=sid)
+
+            emit('chat_response', {
+                'message': result.get('response', f"## 🎉 Deployed!\n\n**Live URL:** [{live_url}]({live_url})"),
+                'execution': {
+                    'status': 'completed',
+                    'progress': 100,
+                    'liveUrl': live_url,
+                    'steps': [],
+                },
+                'timestamp': datetime.now().isoformat(),
+            }, room=sid)
+        else:
+            error = result.get('error', 'Unknown error')
+            stream_terminal_log(f"❌ Deploy failed: {error}", "error", sid=sid)
+
+            emit('deploy_complete', {
+                'error': error,
+                'timestamp': datetime.now().isoformat(),
+            }, room=sid)
+
+            emit('chat_response', {
+                'message': f"## ❌ Deployment Failed\n\n**Error:** {error}",
+                'timestamp': datetime.now().isoformat(),
+            }, room=sid)
+
+    except Exception as e:
+        logger.error(f"Deploy error: {e}")
+        import traceback
+        traceback.print_exc()
+        emit('deploy_complete', {
+            'error': str(e),
+        }, room=sid)
+
+
+# ============================================================
+# Health & Root
+# ============================================================
+@app.route('/api/health')
+def health_check():
+    db_stats = db_connection.get_stats() if db_connection else {'status': 'disconnected'}
+
+    agent_count = 0
+    try:
+        orch = get_orchestrator()
+        if orch:
+            agent_count = len(orch.agents)
+    except Exception:
+        pass
+
+    return jsonify({
+        'status': 'healthy' if db_stats.get('status') == 'connected' else 'degraded',
+        'database': db_stats.get('status', 'unknown'),
+        'registered_blueprints': blueprints_loaded,
+        'agents': agent_count,
+        'timestamp': datetime.now().isoformat(),
+        'version': '3.0.0',
+        'async_mode': async_mode,
+        'tokens': {
+            'github': bool(os.getenv('GITHUB_TOKEN')),
+            'groq': bool(os.getenv('GROQ_API_KEY')),
+            'vercel': bool(os.getenv('VERCEL_TOKEN')),
+            'render': bool(os.getenv('RENDER_API_KEY')),
+            'netlify': bool(os.getenv('NETLIFY_TOKEN')),
+            'cloudflared': bool(os.getenv('CLOUDFLARED_PATH')) or bool(__import__('shutil').which('cloudflared')),
+        },
+    })
+
+
+@app.route('/')
+def root():
+    return jsonify({
+        'name': 'Smart DevOps Backend — Agentic AI',
+        'status': 'running',
+        'version': '3.0.0',
+        'async_mode': async_mode,
+        'socket_events': ['chat', 'devops_action', 'deploy_start'],
+    })
+
+
+# ============================================================
+# Run Application
+# ============================================================
+if __name__ == '__main__':
+    port = int(os.getenv('PORT', 5000))
+    print(f"\n{'='*60}")
+    print(f"  Smart DevOps Backend — Agentic AI Edition")
+    print(f"{'='*60}")
+    print(f"  Port:           {port}")
+    print(f"  Async mode:     {async_mode}")
+    print(f"  Socket.IO:      http://localhost:{port}")
+    print(f"  Health check:   http://localhost:{port}/api/health")
+    print(f"{'='*60}")
+    print(f"  Tokens:")
+    print(f"    GitHub:       {'SET' if os.getenv('GITHUB_TOKEN') else 'NOT SET'}")
+    print(f"    Groq:         {'SET' if os.getenv('GROQ_API_KEY') else 'NOT SET'}")
+    print(f"    Vercel:       {'SET' if os.getenv('VERCEL_TOKEN') else 'NOT SET'}")
+    print(f"    Render:       {'SET' if os.getenv('RENDER_API_KEY') else 'NOT SET'}")
+    print(f"    Netlify:      {'SET' if os.getenv('NETLIFY_TOKEN') else 'NOT SET'}")
+    print(f"{'='*60}\n")
+
+    if async_mode == 'gevent':
+        from gevent import pywsgi
+        from geventwebsocket.handler import WebSocketHandler
+        server = pywsgi.WSGIServer(
+            ('0.0.0.0', port),
+            app,
+            handler_class=WebSocketHandler
+        )
+        print(f"✅ gevent WSGIServer starting with WebSocket support...\n")
+        server.serve_forever()
+    else:
+        socketio.run(
+            app,
+            host='0.0.0.0',
+            port=port,
+            debug=False,
+            allow_unsafe_werkzeug=True
+        )

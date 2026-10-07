@@ -1,0 +1,538 @@
+"""
+DeployAgent — Agentic Multi-Provider Deployment
+================================================
+
+Features:
+- Multi-provider deployment (Vercel, Render)
+- Auto stack detection
+- Retry with reflection on failure
+- Auto-fix via HealerAgent (autonomous loop)
+- Detailed logging for debugging
+- Real-time deployment monitoring
+"""
+
+import os
+import re
+import time
+import json
+from typing import Dict, Any, Optional, List
+from datetime import datetime
+
+from ..base_agent import BaseAgent
+
+
+class DeployAgent(BaseAgent):
+    """
+    Agentic Deployment Agent.
+
+    Capabilities:
+    - Detect provider automatically
+    - Deploy to Vercel / Render
+    - Monitor deployment
+    - Auto-fix on failure via HealerAgent
+    - Retry with reflection
+    """
+
+    PROVIDERS = {
+        'vercel': 'Vercel (frontend/static)',
+        'render': 'Render (backend/full-stack)',
+    }
+
+    def __init__(self, config: Optional[Dict] = None):
+        super().__init__(
+            'DeployAgent',
+            config={
+                **(config or {}),
+                'role': 'deployment specialist',
+                'goal': 'Deploy applications to cloud with automatic error recovery',
+                'capabilities': [
+                    'detect_provider',
+                    'deploy_vercel',
+                    'deploy_render',
+                    'monitor_deployment',
+                    'auto_fix_deploy',
+                ],
+                'max_retries': 3,
+            }
+        )
+
+        # Stats
+        self.total_deployments = 0
+        self.successful_deployments = 0
+        self.failed_deployments = 0
+
+        # Provider tokens
+        self.vercel_token = os.getenv('VERCEL_TOKEN')
+        self.render_api_key = os.getenv('RENDER_API_KEY')
+        self.render_owner_id = os.getenv('RENDER_OWNER_ID')
+
+    # ============================================
+    # Main Entry Point
+    # ============================================
+    def process(self, input_data: Any, context: Optional[Dict] = None) -> Dict:
+        """Main deployment workflow."""
+        context = context or {}
+        sid = context.get('sid')
+
+        if not isinstance(input_data, dict):
+            return {'success': False, 'error': 'Input must be a dict'}
+
+        repo_url = input_data.get('repo_url')
+        provider = input_data.get('provider', 'auto') or 'auto'
+        project_name = input_data.get('project_name')
+        repo_id = input_data.get('repo_id', 0)
+
+        self.emit_log("=" * 60, "info", sid)
+        self.emit_log("🚀 DeployAgent started", "info", sid)
+        self.emit_log(f"📦 Repo: {repo_url}", "info", sid)
+        self.emit_log(f"🎯 Provider: {provider}", "info", sid)
+        self.emit_log("=" * 60, "info", sid)
+
+        if not repo_url:
+            return {'success': False, 'error': 'No repo_url provided'}
+
+        start_time = time.time()
+        self.clear_working_memory()
+
+        try:
+            # ============================================
+            # STEP 1: Parse GitHub URL
+            # ============================================
+            self.emit_log("", "info", sid)
+            self.emit_log("📍 STEP 1/6: Parsing GitHub URL", "info", sid)
+
+            parsed = self.use_tool('github_parse_url', url=repo_url)
+            if not parsed.get('success'):
+                return {'success': False, 'error': 'Invalid GitHub URL'}
+
+            owner = parsed['owner']
+            repo = parsed['repo']
+            self.emit_log(f"   Owner: {owner}, Repo: {repo}", "info", sid)
+
+            if not project_name:
+                project_name = repo
+
+            # ============================================
+            # STEP 2: Fetch repo metadata (get repo_id!)
+            # ============================================
+            self.emit_log("", "info", sid)
+            self.emit_log("📍 STEP 2/6: Fetching repo metadata", "info", sid)
+
+            self.emit_log(
+                f"   🔧 Calling github_get_repo_info(owner={owner}, repo={repo})",
+                "info", sid
+            )
+
+            repo_info = self.use_tool('github_get_repo_info', owner=owner, repo=repo)
+
+            self.emit_log(f"   📊 Tool returned: {str(repo_info)[:300]}", "info", sid)
+
+            if not repo_info.get('success'):
+                error_detail = repo_info.get('error', 'unknown error')
+                self.emit_log(f"   ❌ GitHub API error: {error_detail[:200]}", "error", sid)
+                return {
+                    'success': False,
+                    'error': f'Could not fetch repo info: {error_detail}',
+                }
+
+            default_branch = repo_info.get('default_branch', 'main')
+            repo_id = repo_info.get('id', repo_id)  # ⭐ Get repo ID from API
+            self.emit_log(f"   ✅ Branch: {default_branch}", "success", sid)
+            self.emit_log(f"   ✅ Repo ID: {repo_id}", "info", sid)
+
+            self.remember('default_branch', default_branch)
+            self.remember('repo_id', repo_id)
+
+            # ============================================
+            # STEP 3: Clone + detect stack
+            # ============================================
+            self.emit_log("", "info", sid)
+            self.emit_log("📍 STEP 3/6: Detecting stack", "info", sid)
+
+            clone_result = self.use_tool('github_clone', owner=owner, repo=repo, branch=default_branch)
+            if not clone_result.get('success'):
+                return {'success': False, 'error': 'Clone failed'}
+
+            repo_path = clone_result.get('path')
+            stack_result = self.use_tool('detect_stack', repo_path=repo_path)
+            stack_type = stack_result.get('type', 'node')
+            framework = stack_result.get('framework', 'unknown')
+            root_dir = stack_result.get('root_dir')
+
+            self.emit_log(f"   Stack: {stack_type} ({framework})", "success", sid)
+
+            # ============================================
+            # STEP 4: Decide provider
+            # ============================================
+            self.emit_log("", "info", sid)
+            self.emit_log("📍 STEP 4/6: Choosing provider", "info", sid)
+
+            if provider == 'auto':
+                provider = self._decide_provider(stack_type, framework, sid)
+
+            self.emit_log(f"   ✅ Provider: {provider}", "success", sid)
+
+            # ============================================
+            # STEP 5: Deploy with auto-fix retry
+            # ============================================
+            self.emit_log("", "info", sid)
+            self.emit_log("📍 STEP 5/6: Deploying", "info", sid)
+
+            deploy_result = self._deploy_with_retry(
+                provider=provider,
+                owner=owner,
+                repo=repo,
+                project_name=project_name,
+                stack_type=stack_type,
+                root_dir=root_dir,
+                repo_id=repo_id,
+                branch=default_branch,
+                sid=sid,
+            )
+
+            # ============================================
+            # STEP 6: Build response
+            # ============================================
+            elapsed = time.time() - start_time
+            self.total_deployments += 1
+
+            if deploy_result.get('success'):
+                self.successful_deployments += 1
+                self.track_metric(True, elapsed)
+
+                deploy_url = deploy_result.get('url', 'N/A')
+                dashboard_url = deploy_result.get('dashboard_url', '')
+
+                self.emit_log("", "info", sid)
+                self.emit_log("=" * 60, "success", sid)
+                self.emit_log(f"🎉 DEPLOYED in {elapsed:.1f}s", "success", sid)
+                self.emit_log(f"   URL: {deploy_url}", "success", sid)
+                self.emit_log(f"   Fixes applied: {deploy_result.get('auto_fixes_applied', 0)}", "info", sid)
+                self.emit_log("=" * 60, "success", sid)
+
+                response_md = (
+                    f"## 🎉 Deployment Successful!\n\n"
+                    f"**Repo:** [{owner}/{repo}]({repo_url})\n"
+                    f"**Provider:** `{provider}`\n"
+                    f"**Stack:** `{stack_type}` ({framework})\n"
+                    f"**Live URL:** [{deploy_url}]({deploy_url})\n"
+                )
+                if deploy_result.get('auto_fixes_applied', 0) > 0:
+                    response_md += f"**Auto-fixes applied:** {deploy_result['auto_fixes_applied']}\n"
+                if dashboard_url:
+                    response_md += f"\n### Dashboard\n- [View on {provider.title()}]({dashboard_url})\n"
+
+                return {
+                    'success': True,
+                    'type': 'deploy',
+                    'status': 'deployed',
+                    'repo': f'{owner}/{repo}',
+                    'provider': provider,
+                    'url': deploy_url,
+                    'live_url': deploy_url,
+                    'dashboard_url': dashboard_url,
+                    'stack': {'type': stack_type, 'framework': framework},
+                    'auto_fixes_applied': deploy_result.get('auto_fixes_applied', 0),
+                    'duration': f'{elapsed:.1f}s',
+                    'response': response_md,
+                }
+            else:
+                self.failed_deployments += 1
+                self.track_metric(False, elapsed)
+
+                error = deploy_result.get('error', 'Unknown error')
+
+                self.emit_log("", "info", sid)
+                self.emit_log("=" * 60, "error", sid)
+                self.emit_log(f"❌ DEPLOYMENT FAILED after {elapsed:.1f}s", "error", sid)
+                self.emit_log(f"   Error: {error[:200]}", "error", sid)
+                self.emit_log("=" * 60, "error", sid)
+
+                return {
+                    'success': False,
+                    'type': 'deploy',
+                    'status': 'failed',
+                    'repo': f'{owner}/{repo}',
+                    'provider': provider,
+                    'error': error,
+                    'duration': f'{elapsed:.1f}s',
+                    'response': (
+                        f"## ⚠️ Deployment Failed\n\n"
+                        f"**Repo:** [{owner}/{repo}]({repo_url})\n"
+                        f"**Provider:** `{provider}`\n"
+                        f"**Error:** {error[:300]}\n\n"
+                        f"The auto-fix system tried but could not fully resolve the issue."
+                    ),
+                }
+
+        except Exception as e:
+            elapsed = time.time() - start_time
+            self.failed_deployments += 1
+            self.track_metric(False, elapsed)
+            self.emit_log(f"❌ Fatal: {str(e)[:200]}", "error", sid)
+            import traceback
+            traceback.print_exc()
+            return {'success': False, 'error': str(e)}
+
+    # ============================================
+    # Provider Selection
+    # ============================================
+    def _decide_provider(
+        self,
+        stack_type: str,
+        framework: str,
+        sid: Optional[str] = None,
+    ) -> str:
+        """Decide best provider based on stack."""
+        fw = (framework or '').lower()
+
+        # Frontend frameworks → Vercel
+        if any(x in fw for x in ['react', 'vue', 'next', 'svelte', 'static', 'vite']):
+            self.emit_log(f"   Frontend detected → Vercel", "info", sid)
+            return 'vercel'
+
+        # Backend / full-stack → Render
+        if any(x in fw for x in ['django', 'flask', 'fastapi', 'express', 'node']):
+            self.emit_log(f"   Backend detected → Render", "info", sid)
+            return 'render'
+
+        # Default by stack type
+        if stack_type == 'node':
+            return 'vercel'
+        return 'render'
+
+    # ============================================
+    # Deploy with auto-fix retry
+    # ============================================
+    def _deploy_with_retry(
+        self,
+        provider: str,
+        owner: str,
+        repo: str,
+        project_name: str,
+        stack_type: str,
+        root_dir: Optional[str],
+        repo_id: int,
+        branch: str,
+        sid: Optional[str] = None,
+    ) -> Dict:
+        """
+        Deploy with automatic retry + HealerAgent integration.
+        """
+        max_attempts = 3
+        last_error = None
+        total_fixes = 0
+
+        # Import healer (lazy)
+        healer = None
+        try:
+            from .healer_agent import HealerAgent
+            healer = HealerAgent()
+        except Exception as e:
+            self.emit_log(f"⚠️ Could not load HealerAgent: {str(e)[:100]}", "warning", sid)
+
+        for attempt in range(1, max_attempts + 1):
+            self.emit_log("", "info", sid)
+            self.emit_log(f"🔁 Deploy attempt {attempt}/{max_attempts}", "info", sid)
+
+            try:
+                # Execute deploy based on provider
+                if provider == 'vercel':
+                    result = self._deploy_vercel(
+                        owner, repo, project_name, root_dir, repo_id, branch, sid
+                    )
+                elif provider == 'render':
+                    result = self._deploy_render(
+                        owner, repo, project_name, stack_type, branch, sid
+                    )
+                else:
+                    return {'success': False, 'error': f'Unknown provider: {provider}'}
+
+                if result.get('success'):
+                    if attempt > 1:
+                        self.emit_log(
+                            f"✅ Deploy succeeded after {attempt} attempts",
+                            "success", sid
+                        )
+                    result['auto_fixes_applied'] = total_fixes
+                    return result
+
+                last_error = result.get('error', 'Unknown error')
+                self.emit_log(f"❌ Attempt {attempt} failed: {last_error[:150]}", "error", sid)
+
+            except Exception as e:
+                last_error = str(e)
+                self.emit_log(f"❌ Attempt {attempt} exception: {last_error[:150]}", "error", sid)
+                import traceback
+                traceback.print_exc()
+
+            # No more retries?
+            if attempt >= max_attempts:
+                self.emit_log(f"⚠️ Max deploy attempts reached", "error", sid)
+                break
+
+            # ⭐ Try to heal via HealerAgent
+            if not healer:
+                self.emit_log("⚠️ HealerAgent not available — cannot auto-fix", "warning", sid)
+                break
+
+            self.emit_log("", "info", sid)
+            self.emit_log("🩺 Deploy failed. Delegating to HealerAgent...", "info", sid)
+
+            try:
+                fix_result = healer.process(
+                    {
+                        'action': 'fix',
+                        'repo_url': f'https://github.com/{owner}/{repo}',
+                        'error_message': f'Deployment to {provider} failed: {last_error}',
+                        'error_logs': '',
+                        'max_attempts': 2,
+                    },
+                    {'sid': sid, 'repo_url': f'https://github.com/{owner}/{repo}'}
+                )
+
+                if fix_result.get('success'):
+                    total_fixes += 1
+                    fix_sha = fix_result.get('commit_sha', 'N/A')
+                    self.emit_log(
+                        f"✅ Fix applied (commit: {str(fix_sha)[:8]})",
+                        "success", sid
+                    )
+                    self.emit_log("   ⏳ Waiting before retry...", "info", sid)
+                    time.sleep(5)
+                else:
+                    self.emit_log(
+                        f"❌ Healer could not fix: {fix_result.get('error')}",
+                        "error", sid
+                    )
+                    break
+
+            except Exception as e:
+                self.emit_log(f"❌ Healer error: {str(e)[:150]}", "error", sid)
+                break
+
+        return {
+            'success': False,
+            'error': f'Deploy failed after {max_attempts} attempts: {last_error}',
+            'attempts': max_attempts,
+            'auto_fixes_applied': total_fixes,
+        }
+
+    # ============================================
+    # Vercel Deploy
+    # ============================================
+    def _deploy_vercel(
+        self,
+        owner: str,
+        repo: str,
+        project_name: str,
+        root_dir: Optional[str],
+        repo_id: int,
+        branch: str,
+        sid: Optional[str] = None,
+    ) -> Dict:
+        """Deploy to Vercel."""
+        self.emit_log("   🔧 Calling vercel_deploy tool...", "info", sid)
+        self.emit_log(f"   📋 Args: owner={owner}, repo={repo}, repo_id={repo_id}", "info", sid)
+
+        result = self.use_tool(
+            'vercel_deploy',
+            owner=owner,
+            repo=repo,
+            project_name=project_name,
+            root_dir=root_dir,
+            repo_id=repo_id,  # ⭐ FIX: pass repo_id to Vercel API
+            branch=branch,
+        )
+
+        self.emit_log(f"   📊 vercel_deploy result: {str(result)[:200]}", "info", sid)
+
+        if not result.get('success'):
+            return result
+
+        deploy_id = result.get('deploy_id')
+
+        # Get URL
+        self.emit_log("   🔧 Fetching deploy URL...", "info", sid)
+        url_result = self.use_tool(
+            'vercel_get_url',
+            deploy_id=deploy_id,
+            project_name=project_name,
+        )
+
+        final_url = url_result.get('url', f'https://{project_name}.vercel.app')
+        self.emit_log(f"   ✅ Live URL: {final_url}", "success", sid)
+
+        return {
+            'success': True,
+            'provider': 'vercel',
+            'url': final_url,
+            'dashboard_url': 'https://vercel.com/dashboard',
+            'deploy_id': deploy_id,
+        }
+
+    # ============================================
+    # Render Deploy
+    # ============================================
+    def _deploy_render(
+        self,
+        owner: str,
+        repo: str,
+        project_name: str,
+        stack_type: str,
+        branch: str,
+        sid: Optional[str] = None,
+    ) -> Dict:
+        """Deploy to Render."""
+        self.emit_log("   🔧 Calling render_deploy tool...", "info", sid)
+
+        result = self.use_tool(
+            'render_deploy',
+            owner=owner,
+            repo=repo,
+            project_name=project_name,
+            stack_type=stack_type,
+            branch=branch,
+        )
+
+        self.emit_log(f"   📊 render_deploy result: {str(result)[:200]}", "info", sid)
+
+        if not result.get('success'):
+            return result
+
+        service_id = result.get('service_id')
+
+        # Get URL
+        self.emit_log("   🔧 Fetching service URL...", "info", sid)
+        url_result = self.use_tool(
+            'render_get_url',
+            service_id=service_id,
+            project_name=project_name,
+        )
+
+        final_url = url_result.get('url', f'https://{project_name}.onrender.com')
+        self.emit_log(f"   ✅ Live URL: {final_url}", "success", sid)
+
+        return {
+            'success': True,
+            'provider': 'render',
+            'url': final_url,
+            'dashboard_url': 'https://dashboard.render.com',
+            'service_id': service_id,
+        }
+
+    # ============================================
+    # Metrics
+    # ============================================
+    def get_metrics(self) -> Dict:
+        base = super().get_metrics()
+        return {
+            **base,
+            'total_deployments': self.total_deployments,
+            'successful_deployments': self.successful_deployments,
+            'failed_deployments': self.failed_deployments,
+            'success_rate': (
+                (self.successful_deployments / self.total_deployments * 100)
+                if self.total_deployments > 0 else 0
+            ),
+        }

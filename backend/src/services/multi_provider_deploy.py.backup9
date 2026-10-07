@@ -1,0 +1,754 @@
+"""
+MultiProviderDeployService — UNIVERSAL PRODUCTION
+==================================================
+Deploy ANY repo to Vercel/Netlify/Render.
+
+Features:
+- Clone repo → detect structure → auto-fix configs → deploy
+- Auto-create _redirects (SPA fix)
+- Auto-fix package.json homepage
+- Auto-create netlify.toml + vercel.json
+- Auto-commit + push configs
+- Wait for build completion
+- Return WORKING URL
+"""
+
+import os
+import re
+import sys
+import time
+import json
+import shutil
+import random
+import string
+import subprocess
+import tempfile
+import requests
+from pathlib import Path
+from typing import Dict, Any, Optional
+
+
+class MultiProviderDeployService:
+    """Universal deploy engine — works for ANY repo."""
+
+    def __init__(self, agent=None):
+        self.agent = agent
+        self.vercel_token = os.getenv('VERCEL_TOKEN')
+        self.netlify_token = os.getenv('NETLIFY_TOKEN')
+        self.render_api_key = os.getenv('RENDER_API_KEY')
+        self.render_owner_id = os.getenv('RENDER_OWNER_ID')
+        self.github_token = os.getenv('GITHUB_TOKEN')
+        self.temp_root = os.path.join(tempfile.gettempdir(), 'universal_deploy')
+        os.makedirs(self.temp_root, exist_ok=True)
+
+    # ============================================
+    # HELPERS
+    # ============================================
+    def _suffix(self, n=6):
+        return ''.join(random.choices(string.ascii_lowercase + string.digits, k=n))
+
+    def _safe_name(self, repo, max_len=30):
+        name = re.sub(r'[^a-z0-9\-]', '-', repo.lower())
+        name = re.sub(r'-+', '-', name).strip('-')
+        return name[:max_len] or 'app'
+
+    def _run(self, cmd, cwd, log, timeout=300):
+        """Run command quietly (for git operations)."""
+        try:
+            result = subprocess.run(
+                cmd, cwd=cwd, shell=True,
+                capture_output=True, text=True, timeout=timeout,
+            )
+            return result.returncode == 0, result.stdout, result.stderr
+        except Exception as e:
+            return False, '', str(e)
+
+    def _clone_repo(self, owner, repo, branch, log):
+        """Clone repo to temp dir."""
+        deploy_id = f"{owner}-{repo}-{self._suffix()}"
+        target = os.path.join(self.temp_root, deploy_id)
+
+        if os.path.exists(target):
+            shutil.rmtree(target, ignore_errors=True)
+
+        clone_url = (
+            f'https://{self.github_token}@github.com/{owner}/{repo}.git'
+            if self.github_token else
+            f'https://github.com/{owner}/{repo}.git'
+        )
+
+        log(f"   📥 Cloning {owner}/{repo}...")
+        try:
+            result = subprocess.run(
+                ['git', 'clone', '--depth', '1', '--single-branch', '-b', branch, clone_url, target],
+                capture_output=True, text=True, timeout=180,
+            )
+            if result.returncode != 0:
+                return None, f'Clone failed: {result.stderr[:200]}'
+
+            # Configure git for commit
+            subprocess.run(
+                ['git', 'config', 'user.email', 'bot@agentic-ai.dev'],
+                cwd=target, capture_output=True, timeout=10,
+            )
+            subprocess.run(
+                ['git', 'config', 'user.name', 'Agentic AI Bot'],
+                cwd=target, capture_output=True, timeout=10,
+            )
+
+            log(f"   ✅ Cloned")
+            return target, None
+        except Exception as e:
+            return None, str(e)[:200]
+
+    def _detect_structure(self, repo_path):
+        """
+        Universal repo structure detection.
+        Returns: {
+            'framework': 'react'|'vue'|'vite'|'next'|'static'|'unknown',
+            'root_dir': str (relative to repo root),
+            'build_command': str,
+            'publish_dir': str,
+            'node_version': str,
+            'has_frontend': bool,
+            'has_backend': bool,
+            'backend_dir': str,
+            'backend_lang': str,
+        }
+        """
+        result = {
+            'framework': 'unknown',
+            'root_dir': '',
+            'build_command': 'npm run build',
+            'publish_dir': 'build',
+            'node_version': '20',
+            'has_frontend': False,
+            'has_backend': False,
+            'backend_dir': '',
+            'backend_lang': '',
+        }
+
+        # Find frontend directory
+        frontend_candidates = ['.', 'frontend', 'client', 'web', 'ui', 'app']
+        frontend_path = None
+        frontend_rel = None
+
+        for cand in frontend_candidates:
+            p = repo_path if cand == '.' else os.path.join(repo_path, cand)
+            pkg = os.path.join(p, 'package.json')
+            if os.path.exists(pkg):
+                frontend_path = p
+                frontend_rel = '' if cand == '.' else cand
+                result['has_frontend'] = True
+                result['root_dir'] = frontend_rel
+                break
+
+        # Detect framework from package.json
+        if frontend_path:
+            try:
+                with open(os.path.join(frontend_path, 'package.json')) as f:
+                    pkg = json.load(f)
+
+                deps = {**pkg.get('dependencies', {}), **pkg.get('devDependencies', {})}
+
+                if 'next' in deps:
+                    result['framework'] = 'next'
+                    result['publish_dir'] = '.next'
+                    result['build_command'] = 'npm run build'
+                elif 'vite' in deps:
+                    result['framework'] = 'vite'
+                    result['publish_dir'] = 'dist'
+                    result['build_command'] = 'npm run build'
+                elif 'react-scripts' in deps or 'react' in deps:
+                    result['framework'] = 'react'
+                    result['publish_dir'] = 'build'
+                    result['build_command'] = 'npm run build'
+                elif 'vue' in deps:
+                    result['framework'] = 'vue'
+                    result['publish_dir'] = 'dist'
+                    result['build_command'] = 'npm run build'
+                elif 'angular' in deps:
+                    result['framework'] = 'angular'
+                    result['publish_dir'] = 'dist'
+                    result['build_command'] = 'npm run build'
+                else:
+                    result['framework'] = 'node'
+                    result['publish_dir'] = 'build'
+
+                # Node version from engines
+                engines = pkg.get('engines', {})
+                if 'node' in engines:
+                    v = re.sub(r'[^0-9]', '', str(engines['node']))[:2]
+                    if v:
+                        result['node_version'] = v
+
+            except Exception:
+                pass
+
+        # Detect backend
+        for bdir in ['backend', 'server', 'api']:
+            bp = os.path.join(repo_path, bdir)
+            if os.path.isdir(bp):
+                result['has_backend'] = True
+                result['backend_dir'] = bdir
+
+                if os.path.exists(os.path.join(bp, 'requirements.txt')):
+                    result['backend_lang'] = 'python'
+                elif os.path.exists(os.path.join(bp, 'package.json')):
+                    result['backend_lang'] = 'node'
+                elif os.path.exists(os.path.join(bp, 'go.mod')):
+                    result['backend_lang'] = 'go'
+                break
+
+        return result
+
+    def _auto_create_configs(self, repo_path, structure, owner, repo, branch, log):
+        """
+        Auto-create configs + fix issues in the repo.
+        Commit + push.
+        """
+        modified = []
+        frontend_rel = structure.get('root_dir', '')
+        frontend_path = repo_path if not frontend_rel else os.path.join(repo_path, frontend_rel)
+
+        if not structure.get('has_frontend'):
+            return modified
+
+        # ⭐ 1. Create `_redirects` in public/ (SPA fix)
+        public_dir = os.path.join(frontend_path, 'public')
+        os.makedirs(public_dir, exist_ok=True)
+        redirects_file = os.path.join(public_dir, '_redirects')
+
+        with open(redirects_file, 'w', newline='\n') as f:
+            f.write('/*    /index.html   200\n')
+        modified.append(f'{frontend_rel}/public/_redirects' if frontend_rel else 'public/_redirects')
+        log(f"   ✅ Created _redirects")
+
+        # ⭐ 2. Fix package.json homepage
+        pkg_file = os.path.join(frontend_path, 'package.json')
+        if os.path.exists(pkg_file):
+            try:
+                with open(pkg_file) as f:
+                    pkg = json.load(f)
+
+                # Add homepage for relative paths
+                if structure['framework'] == 'react':
+                    if pkg.get('homepage') != '.':
+                        pkg['homepage'] = '.'
+                        modified.append(f'{frontend_rel}/package.json' if frontend_rel else 'package.json')
+                        log(f"   ✅ Fixed homepage = '.'")
+
+                # Add build script if missing
+                scripts = pkg.setdefault('scripts', {})
+                if 'build' not in scripts:
+                    scripts['build'] = 'react-scripts build' if structure['framework'] == 'react' else 'echo "no build"'
+                    modified.append(f'{frontend_rel}/package.json' if frontend_rel else 'package.json')
+                    log(f"   ✅ Added build script")
+
+                with open(pkg_file, 'w') as f:
+                    json.dump(pkg, f, indent=2)
+
+            except Exception as e:
+                log(f"   ⚠️ package.json fix: {str(e)[:100]}")
+
+        # ⭐ 3. Create netlify.toml (root-level)
+        netlify_toml = os.path.join(repo_path, 'netlify.toml')
+        if not os.path.exists(netlify_toml):
+            base = frontend_rel or ''
+            publish = structure['publish_dir']
+            if frontend_rel:
+                publish = f'{frontend_rel}/{publish}'
+
+            content = f'''[build]
+  base = "{base}"
+  publish = "{publish}"
+  command = "{structure['build_command']}"
+
+[build.environment]
+  NODE_VERSION = "{structure['node_version']}"
+  CI = "false"
+  GENERATE_SOURCEMAP = "false"
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+'''
+            with open(netlify_toml, 'w', newline='\n') as f:
+                f.write(content)
+            modified.append('netlify.toml')
+            log(f"   ✅ Created netlify.toml")
+
+        # ⭐ 4. Create vercel.json (root-level)
+        vercel_json = os.path.join(repo_path, 'vercel.json')
+        if not os.path.exists(vercel_json):
+            content = {
+                'version': 2,
+                'buildCommand': structure['build_command'],
+                'outputDirectory': structure['publish_dir'],
+                'installCommand': 'npm install --legacy-peer-deps',
+                'rewrites': [
+                    {'source': '/(.*)', 'destination': '/index.html'}
+                ],
+            }
+            with open(vercel_json, 'w') as f:
+                json.dump(content, f, indent=2)
+            modified.append('vercel.json')
+            log(f"   ✅ Created vercel.json")
+
+        # ⭐ 5. Git commit + push
+        if modified:
+            log(f"   📝 Committing {len(modified)} file(s)...")
+            try:
+                subprocess.run(['git', 'add', '-A'], cwd=repo_path, capture_output=True, timeout=30)
+
+                commit_msg = 'chore: add production deploy configs (auto)'
+                result = subprocess.run(
+                    ['git', 'commit', '-m', commit_msg],
+                    cwd=repo_path, capture_output=True, text=True, timeout=30,
+                )
+
+                if result.returncode == 0:
+                    push_result = subprocess.run(
+                        ['git', 'push', 'origin', branch],
+                        cwd=repo_path, capture_output=True, text=True, timeout=60,
+                    )
+                    if push_result.returncode == 0:
+                        log(f"   ✅ Pushed configs to GitHub")
+                    else:
+                        log(f"   ⚠️ Push failed: {push_result.stderr[:150]}")
+                else:
+                    log(f"   ⚠️ Commit failed: {result.stderr[:150]}")
+
+            except Exception as e:
+                log(f"   ⚠️ Git error: {str(e)[:150]}")
+
+        return modified
+
+    # ============================================
+    # MAIN DEPLOY
+    # ============================================
+    def deploy(self, provider, owner, repo, repo_url, default_branch, stack_info, sid=None, on_log=None):
+        provider = (provider or '').lower().strip()
+
+        def log(msg, level='info'):
+            try:
+                print(f"[{provider.upper()}] {msg}", flush=True)
+            except Exception:
+                pass
+            if on_log:
+                try:
+                    on_log(msg, level)
+                except Exception:
+                    pass
+
+        log("=" * 60)
+        log(f"🚀 {provider.upper()} Deploy: {owner}/{repo}")
+        log("=" * 60)
+
+        # ⭐ Step 1: Clone + Auto-fix configs
+        repo_path, err = self._clone_repo(owner, repo, default_branch, log)
+        if not repo_path:
+            return {'success': False, 'error': err}
+
+        try:
+            # ⭐ Step 2: Detect structure
+            structure = self._detect_structure(repo_path)
+            log(f"   🔍 Framework: {structure['framework']}")
+            log(f"   📁 Root: {structure['root_dir'] or '(root)'}")
+            log(f"   📁 Publish: {structure['publish_dir']}")
+            log(f"   🔧 Build: {structure['build_command']}")
+            log(f"   📦 Node: {structure['node_version']}")
+
+            # ⭐ Step 3: Auto-fix configs + push
+            log("")
+            log("   🔧 Auto-configuring repo...")
+            modified = self._auto_create_configs(
+                repo_path, structure, owner, repo, default_branch, log
+            )
+
+            if modified:
+                log(f"   ⏳ Waiting for GitHub to register push...")
+                time.sleep(8)
+
+            # ⭐ Step 4: Deploy to provider
+            log("")
+            if provider == 'vercel':
+                return self._deploy_vercel(owner, repo, default_branch, structure, log)
+            elif provider == 'netlify':
+                return self._deploy_netlify(owner, repo, default_branch, structure, log)
+            elif provider == 'render':
+                return self._deploy_render(owner, repo, default_branch, structure, log)
+            else:
+                return {'success': False, 'error': f'Unknown: {provider}'}
+
+        finally:
+            # Cleanup temp
+            try:
+                shutil.rmtree(repo_path, ignore_errors=True)
+            except Exception:
+                pass
+
+    # ============================================
+    # VERCEL
+    # ============================================
+    def _deploy_vercel(self, owner, repo, branch, structure, log):
+        if not self.vercel_token:
+            return {'success': False, 'error': 'VERCEL_TOKEN not set'}
+
+        base_name = self._safe_name(repo, max_len=30)
+        project_name = f"{base_name}-{self._suffix(6)}"
+
+        log(f"   📦 Vercel: {project_name}")
+
+        try:
+            # Repo ID
+            r = requests.get(
+                f'https://api.github.com/repos/{owner}/{repo}',
+                headers={'Authorization': f'token {self.github_token}'},
+                timeout=15,
+            )
+            if r.status_code != 200:
+                return {'success': False, 'error': f'GitHub: {r.status_code}'}
+            repo_id = r.json().get('id')
+
+            # Create project
+            root_dir = structure['root_dir'] or None
+            body = {'name': project_name}
+            if root_dir:
+                body['rootDirectory'] = root_dir
+
+            r = requests.post(
+                'https://api.vercel.com/v10/projects',
+                headers={
+                    'Authorization': f'Bearer {self.vercel_token}',
+                    'Content-Type': 'application/json',
+                },
+                json=body, timeout=20,
+            )
+
+            if r.status_code == 409:
+                project_name = f"{base_name}-{self._suffix(10)}"
+                body['name'] = project_name
+                r = requests.post(
+                    'https://api.vercel.com/v10/projects',
+                    headers={
+                        'Authorization': f'Bearer {self.vercel_token}',
+                        'Content-Type': 'application/json',
+                    },
+                    json=body, timeout=20,
+                )
+
+            if r.status_code not in (200, 201):
+                return {'success': False, 'error': f'Vercel project: {r.text[:250]}'}
+
+            project_id = r.json().get('id')
+            log(f"   ✅ Project: {project_id}")
+
+            # Deploy
+            deploy_body = {
+                'name': repo,
+                'project': project_id,
+                'gitSource': {
+                    'type': 'github', 'ref': branch,
+                    'org': owner, 'repoId': int(repo_id),
+                },
+                'target': 'production',
+            }
+            r = requests.post(
+                'https://api.vercel.com/v13/deployments',
+                headers={
+                    'Authorization': f'Bearer {self.vercel_token}',
+                    'Content-Type': 'application/json',
+                },
+                json=deploy_body, timeout=20,
+            )
+            if r.status_code not in (200, 201):
+                return {'success': False, 'error': f'Vercel deploy: {r.text[:250]}'}
+
+            deploy_id = r.json().get('id')
+            log(f"   🚀 Deploy: {deploy_id}")
+
+            # Poll until READY
+            start = time.time()
+            last_state = None
+            while time.time() - start < 600:
+                try:
+                    r = requests.get(
+                        f'https://api.vercel.com/v13/deployments/{deploy_id}',
+                        headers={'Authorization': f'Bearer {self.vercel_token}'},
+                        timeout=15,
+                    )
+                    if r.status_code == 200:
+                        data = r.json()
+                        state = data.get('readyState') or data.get('status')
+                        if state != last_state:
+                            log(f"   📊 {state}")
+                            last_state = state
+                        if state == 'READY':
+                            url = f'https://{project_name}.vercel.app'
+                            log(f"   ✅ URL: {url}")
+                            return {
+                                'success': True, 'provider': 'vercel',
+                                'url': url, 'primary_url': url, 'live_url': url,
+                                'frontend_url': url,
+                                'frontend_ready': True, 'backend_ready': False,
+                                'project_name': project_name,
+                            }
+                        elif state in ('ERROR', 'CANCELED'):
+                            err = data.get('errorMessage') or state
+                            return {'success': False, 'error': f'Build {state}: {err}'}
+                except Exception:
+                    pass
+                time.sleep(8)
+
+            return {'success': False, 'error': 'Vercel build timeout'}
+
+        except Exception as e:
+            log(f"   ❌ {str(e)[:200]}")
+            return {'success': False, 'error': str(e)[:300]}
+
+    # ============================================
+    # NETLIFY
+    # ============================================
+    def _deploy_netlify(self, owner, repo, branch, structure, log):
+        if not self.netlify_token:
+            return {'success': False, 'error': 'NETLIFY_TOKEN not set'}
+
+        base_name = self._safe_name(repo, max_len=30)
+        site_name = f"{base_name}-{self._suffix(6)}"
+
+        # Correct publish path
+        base_dir = structure['root_dir'] or ''
+        publish_dir = structure['publish_dir']
+        if base_dir:
+            publish_dir = f'{base_dir}/{publish_dir}'
+
+        log(f"   📦 Netlify: {site_name}")
+        log(f"   📁 Base: {base_dir or 'root'}")
+        log(f"   📁 Publish: {publish_dir}")
+
+        try:
+            site_body = {
+                'name': site_name,
+                'repo': {
+                    'provider': 'github',
+                    'repo': f'{owner}/{repo}',
+                    'branch': branch,
+                    'cmd': structure['build_command'],
+                    'dir': publish_dir,
+                    'base': base_dir,
+                    'private': False,
+                },
+            }
+
+            r = requests.post(
+                'https://api.netlify.com/api/v1/sites',
+                headers={
+                    'Authorization': f'Bearer {self.netlify_token}',
+                    'Content-Type': 'application/json',
+                },
+                json=site_body, timeout=30,
+            )
+
+            if r.status_code == 422 and 'subdomain' in r.text.lower():
+                site_name = f"{base_name}-{self._suffix(12)}"
+                site_body['name'] = site_name
+                r = requests.post(
+                    'https://api.netlify.com/api/v1/sites',
+                    headers={
+                        'Authorization': f'Bearer {self.netlify_token}',
+                        'Content-Type': 'application/json',
+                    },
+                    json=site_body, timeout=30,
+                )
+
+            if r.status_code not in (200, 201):
+                return {'success': False, 'error': f'Netlify: {r.text[:300]}'}
+
+            data = r.json()
+            site_id = data.get('id')
+            site_name = data.get('name', site_name)
+            url = f'https://{site_name}.netlify.app'
+
+            log(f"   ✅ Site: {site_id}")
+            log(f"   🌐 URL: {url}")
+
+            # Trigger build
+            try:
+                requests.post(
+                    f'https://api.netlify.com/api/v1/sites/{site_id}/builds',
+                    headers={'Authorization': f'Bearer {self.netlify_token}'},
+                    timeout=20,
+                )
+                log(f"   🚀 Build triggered")
+            except Exception:
+                pass
+
+            # Poll for publish
+            start = time.time()
+            last_state = None
+            while time.time() - start < 600:
+                try:
+                    pr = requests.get(
+                        f'https://api.netlify.com/api/v1/sites/{site_id}',
+                        headers={'Authorization': f'Bearer {self.netlify_token}'},
+                        timeout=15,
+                    )
+                    if pr.status_code == 200:
+                        pd = pr.json()
+                        published = pd.get('published_deploy') or {}
+                        state = published.get('state') or pd.get('state')
+                        if state != last_state:
+                            log(f"   📊 {state}")
+                            last_state = state
+                        if state == 'ready':
+                            log(f"   ✅ Published")
+                            return {
+                                'success': True, 'provider': 'netlify',
+                                'url': url, 'primary_url': url, 'live_url': url,
+                                'frontend_url': url,
+                                'frontend_ready': True, 'backend_ready': False,
+                                'site_id': site_id, 'site_name': site_name,
+                            }
+                        elif state in ('error', 'failed'):
+                            return {'success': False, 'error': f'Build {state}'}
+                except Exception:
+                    pass
+                time.sleep(10)
+
+            return {
+                'success': True, 'provider': 'netlify',
+                'url': url, 'primary_url': url, 'live_url': url,
+                'frontend_url': url,
+                'frontend_ready': True, 'backend_ready': False,
+                'site_id': site_id, 'site_name': site_name,
+                'note': 'Build pending — check dashboard',
+            }
+
+        except Exception as e:
+            log(f"   ❌ {str(e)[:200]}")
+            return {'success': False, 'error': str(e)[:300]}
+
+    # ============================================
+    # RENDER
+    # ============================================
+    def _deploy_render(self, owner, repo, branch, structure, log):
+        if not self.render_api_key:
+            return {'success': False, 'error': 'RENDER_API_KEY not set'}
+
+        base_name = self._safe_name(repo, max_len=30)
+        service_name = f"{base_name}-{self._suffix(6)}"
+
+        lang = structure.get('backend_lang') or 'python'
+        root_dir = structure.get('backend_dir') or ''
+
+        if lang == 'python':
+            env = 'python'
+            build_cmd = 'pip install -r requirements.txt'
+            start_cmd = 'gunicorn app:app --bind 0.0.0.0:$PORT'
+        elif lang == 'node':
+            env = 'node'
+            build_cmd = 'npm install'
+            start_cmd = 'npm start'
+        else:
+            env = 'python'
+            build_cmd = 'pip install -r requirements.txt'
+            start_cmd = 'python app.py'
+
+        log(f"   📦 Render: {service_name}")
+        log(f"   🐍 Env: {env}")
+        if root_dir:
+            log(f"   📁 Root: {root_dir}")
+
+        try:
+            service_details = {
+                'env': env,
+                'plan': 'free',
+                'region': 'oregon',
+                'buildCommand': build_cmd,
+                'startCommand': start_cmd,
+                'autoDeploy': 'yes',
+            }
+            if root_dir:
+                service_details['rootDir'] = root_dir
+
+            body = {
+                'type': 'web_service',
+                'name': service_name,
+                'ownerId': self.render_owner_id,
+                'repo': f'https://github.com/{owner}/{repo}',
+                'branch': branch,
+                'autoDeploy': 'yes',
+                'serviceDetails': service_details,
+            }
+
+            r = requests.post(
+                'https://api.render.com/v1/services',
+                headers={
+                    'Authorization': f'Bearer {self.render_api_key}',
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                },
+                json=body, timeout=30,
+            )
+
+            if r.status_code in (409, 422):
+                service_name = f"{base_name}-{self._suffix(12)}"
+                body['name'] = service_name
+                r = requests.post(
+                    'https://api.render.com/v1/services',
+                    headers={
+                        'Authorization': f'Bearer {self.render_api_key}',
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json',
+                    },
+                    json=body, timeout=30,
+                )
+
+            if r.status_code not in (200, 201):
+                return {'success': False, 'error': f'Render: {r.text[:300]}'}
+
+            data = r.json()
+            service = data.get('service', data)
+            service_id = service.get('id')
+
+            log(f"   ✅ Service: {service_id}")
+
+            # Poll for URL
+            url = f'https://{service_name}.onrender.com'
+            start = time.time()
+            while time.time() - start < 300:
+                try:
+                    sr = requests.get(
+                        f'https://api.render.com/v1/services/{service_id}',
+                        headers={
+                            'Authorization': f'Bearer {self.render_api_key}',
+                            'Accept': 'application/json',
+                        },
+                        timeout=15,
+                    )
+                    if sr.status_code == 200:
+                        sd = sr.json()
+                        s = sd.get('service', sd)
+                        u = (s.get('serviceDetails', {}) or {}).get('url')
+                        if u:
+                            url = u if u.startswith('http') else f'https://{u}'
+                            break
+                except Exception:
+                    pass
+                time.sleep(10)
+
+            log(f"   ✅ URL: {url}")
+
+            return {
+                'success': True, 'provider': 'render',
+                'url': url, 'primary_url': url, 'live_url': url,
+                'backend_url': url,
+                'frontend_ready': False, 'backend_ready': True,
+                'service_id': service_id, 'service_name': service_name,
+            }
+
+        except Exception as e:
+            log(f"   ❌ {str(e)[:200]}")
+            return {'success': False, 'error': str(e)[:300]}

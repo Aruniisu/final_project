@@ -1,0 +1,634 @@
+"""
+Base Agent — High-Performance Agentic AI Foundation
+Includes: LLM reasoning, tool use, reflection, memory, state management
+        + Cross-page event emission
+        + ML feedback logging for auto-training
+"""
+
+import os
+import json
+import logging
+import uuid
+import time
+import traceback
+from abc import ABC, abstractmethod
+from datetime import datetime
+from typing import Dict, Any, Optional, List, Callable
+
+import requests
+
+logger = logging.getLogger(__name__)
+
+# ============================================================
+# ⭐ Event Bus + ML Feedback (safe imports)
+# ============================================================
+try:
+    from core.event_bus import emit_event
+except Exception as _e:
+    def emit_event(*args, **kwargs):
+        pass
+    logger.warning(f"Event bus not available: {_e}")
+
+try:
+    from ml.feedback import log_action as _ml_log
+except Exception as _e:
+    def _ml_log(*args, **kwargs):
+        pass
+    logger.warning(f"ML feedback not available: {_e}")
+
+
+# ============================================================
+# Socket.IO Global Reference
+# ============================================================
+socketio_instance = None
+
+
+def set_socketio(sio):
+    """Register global socketio instance for streaming logs."""
+    global socketio_instance
+    socketio_instance = sio
+    logger.info("[AGENT-CORE] SocketIO instance registered")
+
+
+# ============================================================
+# Base Agent Class
+# ============================================================
+class BaseAgent(ABC):
+    """
+    High-Performance Base Agent.
+
+    Features:
+    - LLM reasoning (Groq)
+    - Tool system
+    - Reflection & self-healing
+    - Short-term + working memory
+    - State management
+    - Metrics tracking
+    - Real-time logging
+    - ⭐ Cross-page event emission
+    - ⭐ ML feedback logging (auto-learning)
+    """
+
+    def __init__(self, name: str, config: Optional[Dict] = None):
+        self.agent_id = str(uuid.uuid4())[:8]
+        self.name = name
+        self.config = config or {}
+        self.role = self.config.get('role', 'generalist')
+        self.capabilities = self.config.get('capabilities', [])
+        self.goal = self.config.get('goal', '')
+
+        # State
+        self.state: Dict[str, Any] = {}
+        self.context: Dict[str, Any] = {}
+
+        # Memory
+        self.short_term_memory: List[Dict] = []
+        self.working_memory: Dict[str, Any] = {}
+        self.memory_limit = self.config.get('memory_limit', 50)
+
+        # Tools
+        self.tools = {}
+        self.tool_registry = None
+        self._register_tools()
+
+        # LLM
+        self.groq_key = os.getenv('GROQ_API_KEY')
+        self.llm_model = os.getenv('GROQ_MODEL', 'openai/gpt-oss-120b')
+        self.llm_max_tokens = int(os.getenv('GROQ_MAX_TOKENS', 2000))
+        self.llm_temperature = float(os.getenv('GROQ_TEMPERATURE', 0.3))
+
+        # Metrics
+        self.created_at = datetime.now()
+        self.last_activity = datetime.now()
+        self.metrics = {
+            'tasks_processed': 0,
+            'success_count': 0,
+            'error_count': 0,
+            'fix_count': 0,
+            'avg_response_time': 0.0,
+            'total_llm_calls': 0,
+            'total_tool_calls': 0,
+        }
+
+        # History
+        self.history: List[Dict] = []
+        self.history_limit = 100
+
+        # Flags
+        self.is_busy = False
+        self.max_retries = self.config.get('max_retries', 3)
+
+        # Auto-load tool registry
+        try:
+            from .tools.tool_registry import create_agent_toolset
+            self.tool_registry = create_agent_toolset(self)
+            print(f"[{self.name}] Tool registry loaded with {len(self.tool_registry.list_tools())} tools")
+        except Exception as e:
+            print(f"[{self.name}] Could not load tool registry: {e}")
+            self.tool_registry = None
+
+    # ============================================================
+    # ⭐ Event + ML Feedback Helper
+    # ============================================================
+    def _agent_key(self) -> str:
+        """Generate a short key from agent name (e.g. 'DeployAgent' → 'deploy')."""
+        n = self.name.lower()
+        for suffix in ['agent', '_agent', ' ']:
+            n = n.replace(suffix, '')
+        return n.strip() or 'agent'
+
+    def _emit_agent_event(
+        self,
+        action: str,
+        success: bool,
+        confidence: float = 0.7,
+        extra: Optional[Dict] = None,
+    ):
+        """
+        Emit cross-page event + log ML feedback.
+        Called automatically after every agent action.
+        """
+        agent_key = self._agent_key()
+
+        # ⭐ Cross-page event
+        try:
+            emit_event(f'{agent_key}:action', {
+                'agent': self.name,
+                'agent_id': self.agent_id,
+                'action': action or agent_key,
+                'success': bool(success),
+                'extra': extra or {},
+            })
+        except Exception as e:
+            logger.warning(f"[{self.name}] emit_event failed: {e}")
+
+        # ⭐ ML feedback (auto-training)
+        try:
+            feats = [
+                float(hash(agent_key) % 100),
+                float(hash(action or '') % 100),
+                0.0, 0.0, 0.0, 0.0, 0.0,
+                float(int(time.time() / 3600) % 24),
+            ]
+            _ml_log(
+                tool=f'{agent_key}:{action or "task"}',
+                features=feats,
+                success=success,
+                confidence=confidence,
+            )
+        except Exception as e:
+            logger.warning(f"[{self.name}] ML log failed: {e}")
+
+    # ============================================================
+    # Abstract Method
+    # ============================================================
+    @abstractmethod
+    def process(self, input_data: Any, context: Optional[Dict] = None) -> Dict:
+        """Main entry point. Subclasses implement this."""
+        pass
+
+    # ============================================================
+    # Tool Registration
+    # ============================================================
+    def _register_tools(self):
+        """Override in subclass. Or use tool_registry."""
+        pass
+
+    def register_tool(self, name: str, func: Callable, description: str = ''):
+        """Register a single tool."""
+        self.tools[name] = {
+            'name': name,
+            'func': func,
+            'description': description,
+        }
+
+    def use_tool(self, name: str, **kwargs) -> Dict:
+        """Execute a tool by name (checks local + registry)."""
+        self.metrics['total_tool_calls'] += 1
+
+        if name in self.tools:
+            try:
+                tool = self.tools[name]
+                result = tool['func'](**kwargs)
+                if isinstance(result, dict):
+                    return result
+                return {'success': True, 'result': result}
+            except Exception as e:
+                logger.error(f"[{self.name}] Tool {name} error: {e}")
+                return {'success': False, 'error': str(e)}
+
+        if self.tool_registry:
+            return self.tool_registry.execute(name, **kwargs)
+
+        return {'success': False, 'error': f'Tool not found: {name}'}
+
+    def list_tools(self) -> List[str]:
+        """List all available tools."""
+        tools = list(self.tools.keys())
+        if self.tool_registry:
+            tools.extend(self.tool_registry.list_tools())
+        return list(set(tools))
+
+    # ============================================================
+    # LLM Reasoning
+    # ============================================================
+    def call_llm(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        expect_json: bool = False,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        retry_on_error: bool = True,
+    ) -> Optional[str]:
+        """Call Groq LLM with retry logic."""
+        if not self.groq_key:
+            self.emit_log("GROQ_API_KEY not set", "error")
+            return None
+
+        try:
+            from groq import Groq
+            client = Groq(api_key=self.groq_key)
+
+            messages = []
+            if system_prompt:
+                messages.append({'role': 'system', 'content': system_prompt})
+            messages.append({'role': 'user', 'content': prompt})
+
+            kwargs = {
+                'model': self.llm_model,
+                'messages': messages,
+                'temperature': temperature if temperature is not None else self.llm_temperature,
+                'max_tokens': max_tokens if max_tokens is not None else self.llm_max_tokens,
+            }
+
+            if expect_json:
+                kwargs['response_format'] = {'type': 'json_object'}
+
+            response = client.chat.completions.create(**kwargs)
+            self.metrics['total_llm_calls'] += 1
+
+            content = response.choices[0].message.content.strip()
+            return content
+
+        except Exception as e:
+            error_msg = str(e)
+            self.emit_log(f"LLM call failed: {error_msg[:150]}", "error")
+
+            if retry_on_error and ('413' in error_msg or 'rate_limit' in error_msg.lower()):
+                self.emit_log("Retrying with reduced payload...", "warning")
+                return self.call_llm(
+                    prompt[:1500],
+                    system_prompt,
+                    expect_json,
+                    temperature,
+                    max_tokens=1500,
+                    retry_on_error=False,
+                )
+
+            return None
+
+    def think(self, prompt: str, context: Optional[Dict] = None) -> Optional[str]:
+        """High-level reasoning with agent's role + goal in system prompt."""
+        system_prompt = (
+            f"You are {self.name}, an AI agent specialized in {self.role}.\n"
+            f"Your goal: {self.goal}\n"
+            f"Available tools: {', '.join(self.list_tools()[:15])}\n"
+            "Think step-by-step. Be concise and action-oriented."
+        )
+        return self.call_llm(prompt, system_prompt)
+
+    def reflect(self, action: str, result: Dict, error: Optional[str] = None) -> Dict:
+        """Reflect on an action's result to learn and adjust."""
+        reflection_prompt = (
+            f"I executed the action: {action}\n"
+            f"Result: {json.dumps(result, default=str)[:500]}\n"
+        )
+        if error:
+            reflection_prompt += f"Error: {error}\n"
+
+        reflection_prompt += (
+            "\nReflect in JSON format:\n"
+            '{"success": true/false, "root_cause": "...", "fix_suggestion": "...", "confidence": 0.0-1.0}'
+        )
+
+        response = self.call_llm(reflection_prompt, expect_json=True)
+        if not response:
+            return {'success': False, 'root_cause': 'reflection failed', 'confidence': 0.0}
+
+        try:
+            return json.loads(response)
+        except json.JSONDecodeError:
+            return {'success': False, 'root_cause': 'invalid reflection JSON', 'confidence': 0.0}
+
+    # ============================================================
+    # Memory Management
+    # ============================================================
+    def add_memory(self, item: Dict):
+        """Add to short-term memory."""
+        item['timestamp'] = datetime.now().isoformat()
+        self.short_term_memory.append(item)
+        if len(self.short_term_memory) > self.memory_limit:
+            self.short_term_memory = self.short_term_memory[-self.memory_limit:]
+
+    def remember(self, key: str, value: Any):
+        """Store in working memory."""
+        self.working_memory[key] = {
+            'value': value,
+            'timestamp': datetime.now().isoformat(),
+        }
+
+    def recall(self, key: str) -> Optional[Any]:
+        """Retrieve from working memory."""
+        item = self.working_memory.get(key)
+        return item['value'] if item else None
+
+    def clear_working_memory(self):
+        """Clear working memory."""
+        self.working_memory = {}
+
+    # ============================================================
+    # State Management
+    # ============================================================
+    def update_state(self, key: str, value: Any):
+        """Update agent state."""
+        self.state[key] = value
+        self.last_activity = datetime.now()
+
+    def get_state(self, key: Optional[str] = None) -> Any:
+        """Get state (all or single key)."""
+        if key:
+            return self.state.get(key)
+        return self.state
+
+    def set_context(self, context: Dict):
+        """Set execution context."""
+        if context:
+            self.context.update(context)
+
+    # ============================================================
+    # Logging
+    # ============================================================
+    def emit_log(self, message: str, level: str = 'info', sid: Optional[str] = None):
+        """Emit log to UI + record activity."""
+        self.log_activity(message, level)
+
+        if socketio_instance:
+            payload = {
+                'timestamp': datetime.now().strftime("%H:%M:%S"),
+                'agent': self.name,
+                'agent_id': self.agent_id,
+                'message': message,
+                'level': level,
+            }
+            try:
+                if sid:
+                    socketio_instance.emit('agent_log', payload, room=sid)
+                    socketio_instance.emit('live_log', payload, room=sid)
+                else:
+                    socketio_instance.emit('agent_log', payload)
+                    socketio_instance.emit('live_log', payload)
+            except Exception as e:
+                logger.error(f"Socket emit error: {e}")
+
+    def log_activity(self, message: str, level: str = 'info', data: Optional[Dict] = None):
+        """Record structured activity."""
+        entry = {
+            'timestamp': datetime.now().isoformat(),
+            'agent': self.name,
+            'agent_id': self.agent_id,
+            'level': level,
+            'message': message,
+            'data': data or {},
+        }
+        self.history.append(entry)
+        if len(self.history) > self.history_limit:
+            self.history = self.history[-self.history_limit:]
+
+        self.last_activity = datetime.now()
+
+        if level == 'info':
+            logger.info(f"[{self.name}] {message}")
+        elif level in ('warning', 'warn'):
+            logger.warning(f"[{self.name}] {message}")
+        elif level in ('error', 'critical'):
+            logger.error(f"[{self.name}] {message}")
+        elif level == 'success':
+            logger.info(f"[{self.name}] OK {message}")
+
+    # ============================================================
+    # Metrics
+    # ============================================================
+    def track_metric(self, success: bool, response_time: float):
+        """Track task metrics."""
+        self.metrics['tasks_processed'] += 1
+        if success:
+            self.metrics['success_count'] += 1
+        else:
+            self.metrics['error_count'] += 1
+
+        total = self.metrics['tasks_processed']
+        current_avg = self.metrics['avg_response_time']
+        self.metrics['avg_response_time'] = ((current_avg * (total - 1)) + response_time) / total
+
+    def get_metrics(self) -> Dict:
+        """Get metrics + success rate."""
+        total = self.metrics['tasks_processed']
+        return {
+            **self.metrics,
+            'success_rate': (self.metrics['success_count'] / total * 100) if total > 0 else 0,
+            'uptime_seconds': (datetime.now() - self.created_at).total_seconds(),
+        }
+
+    # ============================================================
+    # Retry with Reflection
+    # ============================================================
+    def retry_with_reflection(
+        self,
+        action_fn: Callable,
+        action_name: str,
+        max_retries: Optional[int] = None,
+        sid: Optional[str] = None,
+    ) -> Dict:
+        """Execute action with retry + reflection."""
+        max_retries = max_retries or self.max_retries
+        last_error = None
+
+        for attempt in range(1, max_retries + 1):
+            self.emit_log(f"Retry [{action_name}] Attempt {attempt}/{max_retries}", "info", sid)
+
+            try:
+                result = action_fn()
+                if isinstance(result, dict) and result.get('success'):
+                    self.emit_log(f"[{action_name}] Succeeded on attempt {attempt}", "success", sid)
+                    self.metrics['fix_count'] += (1 if attempt > 1 else 0)
+                    return result
+                last_error = result.get('error', 'Unknown error') if isinstance(result, dict) else str(result)
+                self.emit_log(f"[{action_name}] Failed: {last_error[:100]}", "error", sid)
+            except Exception as e:
+                last_error = str(e)
+                self.emit_log(f"[{action_name}] Exception: {last_error[:100]}", "error", sid)
+                traceback.print_exc()
+
+            if attempt < max_retries:
+                self.emit_log(f"[{action_name}] Reflecting...", "info", sid)
+                reflection = self.reflect(action_name, {'attempt': attempt}, last_error)
+                if reflection.get('fix_suggestion'):
+                    self.emit_log(f"Fix suggestion: {reflection['fix_suggestion'][:100]}", "info", sid)
+
+        return {
+            'success': False,
+            'error': f'Failed after {max_retries} attempts: {last_error}',
+            'attempts': max_retries,
+        }
+
+    # ============================================================
+    # ⭐ Sub-Agent Delegation (WITH EVENTS + ML)
+    # ============================================================
+    def delegate_to_agent(self, agent, task: Dict, context: Optional[Dict] = None) -> Dict:
+        """
+        Delegate a task to another agent.
+        ⭐ Emits cross-page events + ML feedback automatically.
+        """
+        action = task.get('action', 'unknown')
+        agent_key = agent._agent_key() if hasattr(agent, '_agent_key') else agent.name.lower()
+
+        self.emit_log(f"Delegating to {agent.name}: {action}", "info")
+
+        # ⭐ Emit START event
+        try:
+            emit_event(f'{agent_key}:delegation_started', {
+                'from': self.name,
+                'to': agent.name,
+                'action': action,
+            })
+        except Exception:
+            pass
+
+        try:
+            result = agent.process(task, context or {})
+            success = isinstance(result, dict) and result.get('success', True)
+
+            self.add_memory({
+                'type': 'delegation',
+                'to': agent.name,
+                'task': action,
+                'result': 'success' if success else 'failed',
+            })
+
+            # ⭐ Emit COMPLETION event
+            try:
+                emit_event(f'{agent_key}:delegation_completed', {
+                    'from': self.name,
+                    'to': agent.name,
+                    'action': action,
+                    'success': success,
+                    'response': (result.get('response') or result.get('message') or '')[:200] if isinstance(result, dict) else '',
+                })
+            except Exception:
+                pass
+
+            # ⭐ ML feedback
+            try:
+                feats = [
+                    float(hash(agent_key) % 100),
+                    float(hash(action) % 100),
+                    0.0, 0.0, 0.0, 0.0, 0.0,
+                    float(int(time.time() / 3600) % 24),
+                ]
+                _ml_log(
+                    tool=f'{agent_key}:{action}',
+                    features=feats,
+                    success=success,
+                    confidence=0.7,
+                )
+            except Exception:
+                pass
+
+            return result
+
+        except Exception as e:
+            self.emit_log(f"Delegation failed: {str(e)[:100]}", "error")
+
+            # ⭐ Emit FAILURE event
+            try:
+                emit_event(f'{agent_key}:delegation_failed', {
+                    'from': self.name,
+                    'to': agent.name,
+                    'action': action,
+                    'error': str(e)[:200],
+                })
+            except Exception:
+                pass
+
+            return {'success': False, 'error': str(e)}
+
+    # ============================================================
+    # Serialization
+    # ============================================================
+    def to_dict(self) -> Dict:
+        """Serialize agent state."""
+        return {
+            'agent_id': self.agent_id,
+            'name': self.name,
+            'role': self.role,
+            'goal': self.goal,
+            'state': self.state,
+            'metrics': self.get_metrics(),
+            'tools': self.list_tools(),
+            'history': self.history[-20:],
+            'memory': self.short_term_memory[-10:],
+            'created_at': self.created_at.isoformat(),
+            'last_activity': self.last_activity.isoformat(),
+        }
+
+    # ============================================================
+    # ⭐ Safe Process Wrapper (WITH EVENTS + ML)
+    # ============================================================
+    def safe_process(self, input_data: Any, context: Optional[Dict] = None) -> Dict:
+        """Wrapper for process() with error handling + metrics + events."""
+        start = time.time()
+        self.is_busy = True
+        self.emit_log(f"Starting: {str(input_data)[:80]}", "info")
+
+        try:
+            result = self.process(input_data, context)
+            elapsed = time.time() - start
+            success = isinstance(result, dict) and result.get('success', True)
+            self.track_metric(success, elapsed)
+            self.emit_log(
+                f"Completed in {elapsed:.2f}s",
+                "success" if success else "warning"
+            )
+
+            # ⭐ Emit agent action event + ML feedback
+            action = ''
+            if isinstance(input_data, dict):
+                action = input_data.get('action', '') or input_data.get('query', '')
+            self._emit_agent_event(
+                action=str(action)[:60],
+                success=success,
+                confidence=0.7,
+                extra={'duration': round(elapsed, 2)},
+            )
+
+            return result
+
+        except Exception as e:
+            elapsed = time.time() - start
+            self.track_metric(False, elapsed)
+            self.emit_log(f"Fatal error: {str(e)[:150]}", "error")
+            traceback.print_exc()
+
+            # ⭐ Emit failure
+            self._emit_agent_event(
+                action='error',
+                success=False,
+                confidence=0.3,
+                extra={'error': str(e)[:200]},
+            )
+
+            return {'success': False, 'error': str(e)}
+
+        finally:
+            self.is_busy = False

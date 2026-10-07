@@ -1,73 +1,42 @@
-from .base_manager import BaseManager
+"""ProjectManager — Basic project management for single-user"""
 from datetime import datetime
+from bson import ObjectId
 
 
-class ProjectManager(BaseManager):
-    """Manager for project operations"""
-    
+class ProjectManager:
     def __init__(self, db):
-        super().__init__(db, 'projects')
-    
-    def create_project(self, user_id, name, description=None, project_type='web'):
-        """Create a new project"""
-        project_data = {
-            'project_id': self._generate_id('proj'),
+        self.db = db
+        self.collection = db.projects
+
+    def create_project(self, user_id, name, repo_url=None, source='github'):
+        project = {
+            'project_id': str(ObjectId()),
             'user_id': user_id,
             'name': name,
-            'description': description,
-            'type': project_type,
-            'status': 'created',
+            'repo_url': repo_url,
+            'source': source,
             'created_at': datetime.now(),
             'updated_at': datetime.now(),
-            'metadata': {},
-            'settings': {
-                'auto_deploy': False,
-                'branch': 'main',
-                'environment': 'development'
-            },
-            'analysis': None
         }
-        
-        return self.create(project_data)
-    
-    def find_by_project_id(self, project_id):
-        """Find project by project_id"""
-        return self.find_by_id(project_id, 'project_id')
-    
-    def find_by_user(self, user_id, limit=50, skip=0):
-        """Find projects by user"""
-        return self.find_many(
-            {'user_id': user_id},
-            sort=[('created_at', -1)],
-            limit=limit,
-            skip=skip
-        )
-    
-    def update_project(self, project_id, data):
-        """Update project"""
-        allowed_fields = ['name', 'description', 'status', 'settings', 'metadata']
-        update_data = {k: v for k, v in data.items() if k in allowed_fields}
-        return self.update(project_id, update_data, 'project_id')
-    
-    def update_analysis(self, project_id, analysis):
-        """Update project analysis"""
-        return self.update(project_id, {'analysis': analysis}, 'project_id')
-    
+        result = self.collection.insert_one(project)
+        project['_id'] = str(result.inserted_id)
+        return project
+
+    def get_projects(self, user_id):
+        projects = list(self.collection.find({'user_id': user_id}))
+        for p in projects:
+            p['_id'] = str(p['_id'])
+        return projects
+
+    def get_project(self, project_id):
+        p = self.collection.find_one({'project_id': project_id})
+        if p:
+            p['_id'] = str(p['_id'])
+        return p
+
     def delete_project(self, project_id):
-        """Delete project"""
-        return self.delete(project_id, 'project_id')
-    
-    def get_project_stats(self, user_id=None):
-        """Get project statistics"""
-        query = {'user_id': user_id} if user_id else {}
-        
-        total = self.count(query)
-        by_status = self.aggregate([
-            {'$match': query},
-            {'$group': {'_id': '$status', 'count': {'$sum': 1}}}
-        ])
-        
-        return {
-            'total_projects': total,
-            'by_status': {item['_id']: item['count'] for item in by_status}
-        }
+        result = self.collection.delete_one({'project_id': project_id})
+        return result.deleted_count > 0
+
+    def count(self):
+        return self.collection.count_documents({})

@@ -848,3 +848,32 @@ body {
 .scrollbar-hidden::-webkit-scrollbar {
   display: none;
 }
+
+/* ⭐ Compact Mode — reduces spacing globally */
+.compact-mode {
+  --spacing-scale: 0.7;
+}
+.compact-mode * {
+  letter-spacing: -0.01em;
+}
+.compact-mode .settings-card,
+.compact-mode .pipeline-card,
+.compact-mode .stat-card {
+  padding: 0.75rem !important;
+}
+.compact-mode .settings-item,
+.compact-mode .pipeline-item {
+  padding: 0.4rem 0.6rem !important;
+}
+.compact-mode .message-wrapper {
+  margin-bottom: 0.5rem !important;
+}
+
+/* ⭐ No Animations — disables transitions globally */
+.no-animations *,
+.no-animations *::before,
+.no-animations *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+}

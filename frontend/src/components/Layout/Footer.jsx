@@ -4,6 +4,7 @@ import { FiMail } from 'react-icons/fi';
 import './Footer.css';
 import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
+import { APP_VERSION } from '../../config/version';
 
 const Footer = () => {
   const currentYear = new Date().getFullYear();
@@ -34,7 +35,7 @@ const Footer = () => {
           </div>
           <div className="footer-status-item">
             <span className="footer-status-dot footer-status-dot-primary"></span>
-            <span className="footer-status-label">v2.3.1</span>
+            <span className="footer-status-label">{APP_VERSION}</span>
           </div>
           <div className="footer-status-item">
             <span className="footer-status-dot footer-status-dot-accent"></span>

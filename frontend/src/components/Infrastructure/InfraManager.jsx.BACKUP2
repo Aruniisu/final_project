@@ -1,0 +1,841 @@
+import React, { useState, useEffect, useCallback } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { useAuth } from '../../context/AuthContext';
+import '../../styles/main.css';
+import '../Dashboard/Dashboard.css';
+import './InfraManager.css';
+import {
+  FiCpu, FiServer, FiActivity, FiTrendingUp, FiTrendingDown,
+  FiAlertCircle, FiCheckCircle, FiRefreshCw,
+  FiZap, FiDollarSign, FiSend, FiXCircle,
+  FiHardDrive, FiUsers,
+} from 'react-icons/fi';
+import { FaRobot, FaMagic } from 'react-icons/fa';
+import { Line, Doughnut } from 'react-chartjs-2';
+import {
+  Chart as ChartJS, CategoryScale, LinearScale, PointElement,
+  LineElement, ArcElement, Title, Tooltip, Legend, Filler,
+} from 'chart.js';
+import toast from 'react-hot-toast';
+import * as assistantModule from '../../api/assistant';
+
+ChartJS.register(
+  CategoryScale, LinearScale, PointElement, LineElement,
+  ArcElement, Title, Tooltip, Legend, Filler
+);
+
+// ============================================
+// SAFE API CALL — doesn't crash if method missing
+// ============================================
+const safeCall = async (method, ...args) => {
+  try {
+    if (assistantModule.infraAPI && typeof assistantModule.infraAPI[method] === 'function') {
+      return await assistantModule.infraAPI[method](...args);
+    }
+  } catch (e) {
+    console.warn(`infraAPI.${method} failed:`, e);
+  }
+  return null;
+};
+
+// ============================================
+// STATS CARD — same style as Dashboard
+// ============================================
+const StatsCard = ({ title, value, change, icon: Icon, color, subtitle, loading }) => {
+  if (loading) {
+    return (
+      <div className="dashboard-stats-card dashboard-stats-card-loading">
+        <div className="dashboard-stats-card-loading-inner">
+          <div className="dashboard-stats-card-loading-title"></div>
+          <div className="dashboard-stats-card-loading-value"></div>
+        </div>
+        <div className="dashboard-stats-card-loading-icon"></div>
+      </div>
+    );
+  }
+
+  const isPositive = change > 0;
+  const isNegative = change < 0;
+
+  return (
+    <div className="dashboard-stats-card">
+      <div className="dashboard-stats-card-content">
+        <p className="dashboard-stats-card-title">{title}</p>
+        <h3 className="dashboard-stats-card-value">{value}</h3>
+        {change !== undefined && change !== null && (
+          <div className="dashboard-stats-card-change">
+            {isPositive && <FiTrendingUp className="dashboard-stats-card-change-icon dashboard-stats-card-change-icon-positive" />}
+            {isNegative && <FiTrendingDown className="dashboard-stats-card-change-icon dashboard-stats-card-change-icon-negative" />}
+            {!isPositive && !isNegative && <FiTrendingUp className="dashboard-stats-card-change-icon dashboard-stats-card-change-icon-neutral" />}
+            <span className={`dashboard-stats-card-change-text ${
+              isPositive ? 'dashboard-stats-card-change-text-positive' :
+              isNegative ? 'dashboard-stats-card-change-text-negative' :
+              'dashboard-stats-card-change-text-neutral'
+            }`}>
+              {isPositive ? '+' : ''}{change}%
+            </span>
+            <span className="dashboard-stats-card-change-label">vs last hour</span>
+          </div>
+        )}
+        {subtitle && <p className="dashboard-stats-card-subtitle">{subtitle}</p>}
+      </div>
+      <div className={`dashboard-stats-card-icon-wrapper ${color}`}>
+        <Icon className="dashboard-stats-card-icon" />
+      </div>
+    </div>
+  );
+};
+
+// ============================================
+// MAIN COMPONENT
+// ============================================
+const InfraManager = () => {
+  const { user } = useAuth();
+
+  // ⭐ Console marker — verify this component loads
+  console.log('🖥️🖥️🖥️ INFRA MANAGER LOADED 🖥️🖥️🖥️');
+
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
+
+  const [services, setServices] = useState([]);
+  const [stats, setStats] = useState({
+    total_services: 0, total_replicas: 0,
+    avg_cpu: 0, avg_memory: 0,
+    total_deployments: 0, total_monitors: 0,
+  });
+  const [health, setHealth] = useState({ score: 100, status: 'excellent' });
+  const [highPerf, setHighPerf] = useState({});
+  const [insights, setInsights] = useState([]);
+  const [predictions, setPredictions] = useState([]);
+  const [costSavings, setCostSavings] = useState([]);
+  const [actionLog, setActionLog] = useState([]);
+
+  const [chatMessages, setChatMessages] = useState([
+    {
+      role: 'assistant',
+      content: "👋 Hi! I'm your Infrastructure AI. Ask me about scaling, performance, or costs.",
+      timestamp: new Date().toLocaleTimeString(),
+    },
+  ]);
+  const [chatInput, setChatInput] = useState('');
+  const [chatLoading, setChatLoading] = useState(false);
+
+  // ============================================
+  // FETCH
+  // ============================================
+  const fetchAll = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
+    try {
+      const [unified, ins, preds, costs, log] = await Promise.all([
+        safeCall('getUnified'),
+        safeCall('getInsights'),
+        safeCall('getPredictions'),
+        safeCall('getCostSavings'),
+        safeCall('getActionLog'),
+      ]);
+
+      if (unified && unified.success !== false) {
+        setServices(unified.services || []);
+        setStats(unified.stats || {});
+        setHealth(unified.health || { score: 100, status: 'excellent' });
+        setHighPerf(unified.high_performance || {});
+      }
+      setInsights(ins || []);
+      setPredictions(preds || []);
+      setCostSavings(costs || []);
+      setActionLog(log || []);
+    } catch (err) {
+      console.error('Infra fetch error:', err);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchAll();
+    const i = setInterval(() => fetchAll(true), 15000);
+    return () => clearInterval(i);
+  }, [fetchAll]);
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    await fetchAll(true);
+    toast.success('Infrastructure refreshed');
+    setTimeout(() => setRefreshing(false), 500);
+  };
+
+  const handleApplyInsight = async (id) => {
+    toast.loading('Applying recommendation...', { id: 'apply' });
+    const res = await safeCall('applyInsight', id);
+    if (res && res.success) {
+      toast.success('✅ Applied!', { id: 'apply' });
+      fetchAll(true);
+    } else {
+      toast.error('Failed to apply', { id: 'apply' });
+    }
+  };
+
+  const handleDismissInsight = (id) => {
+    setInsights(prev => prev.filter(x => x.id !== id));
+    safeCall('dismissInsight', id);
+  };
+
+  const handleChatSend = async () => {
+    const msg = chatInput.trim();
+    if (!msg || chatLoading) return;
+
+    setChatMessages(prev => [
+      ...prev,
+      { role: 'user', content: msg, timestamp: new Date().toLocaleTimeString() },
+    ]);
+    setChatInput('');
+    setChatLoading(true);
+
+    const res = await safeCall('chat', msg);
+    setChatMessages(prev => [
+      ...prev,
+      {
+        role: 'assistant',
+        content: res?.success ? res.message : "⚠️ AI service not available",
+        timestamp: new Date().toLocaleTimeString(),
+      },
+    ]);
+    setChatLoading(false);
+  };
+
+  const handleChatKey = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleChatSend();
+    }
+  };
+
+  // ============================================
+  // CHART DATA
+  // ============================================
+  const trendData = {
+    labels: Array.from({ length: 20 }, (_, i) => `${20 - i}m`),
+    datasets: [
+      {
+        label: 'CPU',
+        data: Array.from({ length: 20 }, (_, i) =>
+          Math.max(10, Math.min(95, (stats.avg_cpu || 45) + Math.sin(i / 3) * 12))
+        ),
+        borderColor: '#3b82f6',
+        backgroundColor: (ctx) => {
+          const chart = ctx.chart;
+          const { ctx: c, chartArea } = chart;
+          if (!chartArea) return 'rgba(59, 130, 246, 0.1)';
+          const g = c.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
+          g.addColorStop(0, 'rgba(59, 130, 246, 0.3)');
+          g.addColorStop(1, 'rgba(59, 130, 246, 0.02)');
+          return g;
+        },
+        fill: true,
+        tension: 0.4,
+        pointRadius: 0,
+        pointHoverRadius: 5,
+      },
+      {
+        label: 'Memory',
+        data: Array.from({ length: 20 }, (_, i) =>
+          Math.max(10, Math.min(95, (stats.avg_memory || 60) + Math.cos(i / 4) * 10))
+        ),
+        borderColor: '#d946ef',
+        backgroundColor: 'rgba(217, 70, 239, 0.05)',
+        fill: true,
+        tension: 0.4,
+        pointRadius: 0,
+        pointHoverRadius: 5,
+      },
+    ],
+  };
+
+  const trendOptions = {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+      legend: {
+        position: 'top',
+        labels: {
+          usePointStyle: true,
+          pointStyle: 'line',
+          padding: 16,
+          font: { size: 11 },
+          color: '#94a3b8',
+        },
+      },
+      tooltip: {
+        backgroundColor: 'rgba(15, 23, 42, 0.9)',
+        titleColor: '#ffffff',
+        bodyColor: '#94a3b8',
+        borderColor: 'rgba(59, 130, 246, 0.2)',
+        borderWidth: 1,
+        borderRadius: 8,
+        padding: 12,
+      },
+    },
+    scales: {
+      y: {
+        beginAtZero: true,
+        max: 100,
+        grid: { color: 'rgba(148, 163, 184, 0.1)', drawBorder: false },
+        ticks: { color: '#94a3b8', font: { size: 11 }, callback: v => v + '%' },
+      },
+      x: {
+        grid: { display: false },
+        ticks: { color: '#94a3b8', font: { size: 11 }, maxTicksLimit: 6 },
+      },
+    },
+    interaction: { intersect: false, mode: 'index' },
+  };
+
+  const running = services.filter(s => s.status === 'running' || s.status === 'monitored').length;
+  const stopped = services.filter(s => s.status === 'stopped').length;
+  const failed = services.filter(s => s.status === 'failed').length;
+
+  const containerData = {
+    labels: ['Running', 'Stopped', 'Failed'],
+    datasets: [
+      {
+        data: [running, stopped, failed],
+        backgroundColor: ['#10b981', '#f59e0b', '#ef4444'],
+        borderWidth: 0,
+        hoverOffset: 8,
+      },
+    ],
+  };
+
+  const containerOptions = {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+      legend: {
+        position: 'bottom',
+        labels: {
+          padding: 16,
+          usePointStyle: true,
+          pointStyle: 'circle',
+          font: { size: 11 },
+          color: '#94a3b8',
+        },
+      },
+      tooltip: {
+        backgroundColor: 'rgba(15, 23, 42, 0.9)',
+        titleColor: '#ffffff',
+        bodyColor: '#94a3b8',
+        borderColor: 'rgba(255, 255, 255, 0.1)',
+        borderWidth: 1,
+        borderRadius: 8,
+        padding: 12,
+      },
+    },
+    cutout: '70%',
+  };
+
+  // ============================================
+  // STATS CARDS
+  // ============================================
+  const statsCards = [
+    {
+      title: 'Services',
+      value: stats.total_services || 0,
+      change: 2.5,
+      icon: FiServer,
+      color: 'color-primary',
+      subtitle: `${stats.total_deployments || 0} deployments`,
+    },
+    {
+      title: 'Replicas',
+      value: stats.total_replicas || 0,
+      change: 5.1,
+      icon: FiUsers,
+      color: 'color-success',
+      subtitle: 'Total instances',
+    },
+    {
+      title: 'Avg CPU',
+      value: `${stats.avg_cpu || 0}%`,
+      change: stats.avg_cpu > 70 ? 8.2 : -3.4,
+      icon: FiCpu,
+      color: 'color-accent',
+      subtitle: 'Across services',
+    },
+    {
+      title: 'Avg Memory',
+      value: `${stats.avg_memory || 0}%`,
+      change: stats.avg_memory > 70 ? 4.5 : -2.1,
+      icon: FiHardDrive,
+      color: 'color-error',
+      subtitle: 'Across services',
+    },
+  ];
+
+  // ============================================
+  // RENDER
+  // ============================================
+  return (
+    <div className="dashboard-container">
+
+      {/* ============ HEADER ============ */}
+      <div className="dashboard-header">
+        <div>
+          <h2 className="dashboard-title">Infrastructure Overview 🖥️</h2>
+          <p className="dashboard-subtitle">
+            Welcome back, {user?.name || 'User'}! AI-powered scaling and real-time monitoring
+          </p>
+        </div>
+        <div className="dashboard-header-actions">
+          <button
+            onClick={handleRefresh}
+            disabled={refreshing}
+            className="dashboard-refresh-btn"
+          >
+            <FiRefreshCw
+              className={`dashboard-refresh-icon ${refreshing ? 'dashboard-refresh-icon-spinning' : ''}`}
+            />
+            <span>{refreshing ? 'Refreshing...' : 'Refresh'}</span>
+          </button>
+          <div className="dashboard-status-badge">
+            <span className="dashboard-status-dot"></span>
+            <span>Health {health.score}/100</span>
+          </div>
+        </div>
+      </div>
+
+      {/* ============ STATS ============ */}
+      <div className="dashboard-stats-grid">
+        {statsCards.map((s, i) => (
+          <StatsCard key={i} {...s} loading={loading} />
+        ))}
+      </div>
+
+      {/* ============ CHARTS ============ */}
+      <div className="dashboard-charts-grid">
+        <div className="dashboard-chart-card dashboard-chart-card-large">
+          <div className="dashboard-chart-header">
+            <div>
+              <h3 className="dashboard-chart-title">Resource Trends</h3>
+              <p className="dashboard-chart-subtitle">Last 20 minutes</p>
+            </div>
+            <div className="dashboard-chart-legend">
+              <span className="dashboard-chart-legend-item">
+                <span className="dashboard-chart-legend-color" style={{ background: '#3b82f6' }}></span>
+                CPU
+              </span>
+              <span className="dashboard-chart-legend-item">
+                <span className="dashboard-chart-legend-color" style={{ background: '#d946ef' }}></span>
+                Memory
+              </span>
+            </div>
+          </div>
+          <div className="dashboard-chart-wrapper">
+            <Line data={trendData} options={trendOptions} />
+          </div>
+        </div>
+
+        <div className="dashboard-chart-card">
+          <div className="dashboard-chart-header">
+            <div>
+              <h3 className="dashboard-chart-title">Service Status</h3>
+              <p className="dashboard-chart-subtitle">By state</p>
+            </div>
+          </div>
+          <div className="dashboard-chart-wrapper dashboard-chart-doughnut-wrapper">
+            <Doughnut data={containerData} options={containerOptions} />
+          </div>
+        </div>
+      </div>
+
+      {/* ============ AI INSIGHTS + ACTION LOG ============ */}
+      <div className="dashboard-two-column-grid">
+
+        {/* AI Insights */}
+        <div className="dashboard-card">
+          <div className="dashboard-card-header">
+            <h3 className="dashboard-card-title">
+              <FaMagic style={{ color: '#a855f7', marginRight: 8, display: 'inline' }} />
+              AI Insights
+            </h3>
+            <button className="dashboard-card-view-all">{insights.length} active</button>
+          </div>
+          <div className="dashboard-activity-list">
+            {insights.length === 0 ? (
+              <div className="dashboard-activity-item status-success">
+                <div className="dashboard-activity-icon">
+                  <FiCheckCircle className="dashboard-status-icon" />
+                </div>
+                <div className="dashboard-activity-content">
+                  <p className="dashboard-activity-title">All systems optimal</p>
+                  <div className="dashboard-activity-meta">
+                    <span>AI</span>
+                    <span className="dashboard-activity-dot"></span>
+                    <span>no recommendations</span>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              insights.slice(0, 4).map((ins) => (
+                <div
+                  key={ins.id}
+                  className={`dashboard-activity-item ${
+                    ins.severity === 'critical' ? 'status-error' :
+                    ins.severity === 'warning' ? 'status-warning' :
+                    'status-info'
+                  }`}
+                >
+                  <div className="dashboard-activity-icon">
+                    {ins.severity === 'critical' ? (
+                      <FiAlertCircle className="dashboard-status-icon" />
+                    ) : (
+                      <FiTrendingUp className="dashboard-status-icon" />
+                    )}
+                  </div>
+                  <div className="dashboard-activity-content">
+                    <p className="dashboard-activity-title">{ins.title}</p>
+                    <div className="dashboard-activity-meta">
+                      <span>{ins.message}</span>
+                    </div>
+                  </div>
+                  {ins.action === 'scale' && (
+                    <button
+                      onClick={() => handleApplyInsight(ins.id)}
+                      style={{
+                        padding: '6px 12px',
+                        background: 'linear-gradient(135deg, #a855f7, #6366f1)',
+                        color: '#fff',
+                        border: 'none',
+                        borderRadius: 8,
+                        fontSize: 11,
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 4,
+                      }}
+                    >
+                      <FiZap /> Apply
+                    </button>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* Action Log */}
+        <div className="dashboard-card">
+          <div className="dashboard-card-header">
+            <h3 className="dashboard-card-title">AI Action Log</h3>
+            <button className="dashboard-card-view-all">Auto</button>
+          </div>
+          <div className="dashboard-activity-list">
+            {actionLog.length === 0 ? (
+              <div className="dashboard-activity-item status-info">
+                <div className="dashboard-activity-icon">
+                  <FiActivity className="dashboard-status-icon" />
+                </div>
+                <div className="dashboard-activity-content">
+                  <p className="dashboard-activity-title">No AI actions yet</p>
+                  <div className="dashboard-activity-meta">
+                    <span>System</span>
+                    <span className="dashboard-activity-dot"></span>
+                    <span>standby</span>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              actionLog.slice(0, 5).map((a, i) => (
+                <div
+                  key={i}
+                  className={`dashboard-activity-item ${
+                    a.reason?.includes('auto') ? 'status-success' : 'status-info'
+                  }`}
+                >
+                  <div className="dashboard-activity-icon">
+                    <FiZap className="dashboard-status-icon" />
+                  </div>
+                  <div className="dashboard-activity-content">
+                    <p className="dashboard-activity-title">
+                      Scaled {a.service} {a.from} → {a.to}
+                    </p>
+                    <div className="dashboard-activity-meta">
+                      <span>{a.reason?.includes('auto') ? 'AUTO' : 'MANUAL'}</span>
+                      <span className="dashboard-activity-dot"></span>
+                      <span>
+                        {new Date((a.timestamp || Date.now() / 1000) * 1000).toLocaleTimeString()}
+                      </span>
+                    </div>
+                  </div>
+                  <span className="dashboard-activity-status">done</span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ============ PREDICTIONS + COST ============ */}
+      <div className="dashboard-two-column-grid">
+
+        {/* Predictions */}
+        <div className="dashboard-card">
+          <div className="dashboard-card-header">
+            <h3 className="dashboard-card-title">
+              <FiTrendingUp style={{ color: '#f59e0b', marginRight: 8, display: 'inline' }} />
+              AI Predictions
+            </h3>
+            <button className="dashboard-card-view-all">30 min</button>
+          </div>
+          <div className="dashboard-activity-list">
+            {predictions.length === 0 ? (
+              <div className="dashboard-activity-item status-success">
+                <div className="dashboard-activity-icon">
+                  <FiCheckCircle className="dashboard-status-icon" />
+                </div>
+                <div className="dashboard-activity-content">
+                  <p className="dashboard-activity-title">No issues predicted</p>
+                  <div className="dashboard-activity-meta">
+                    <span>Next 30 minutes</span>
+                    <span className="dashboard-activity-dot"></span>
+                    <span>all clear</span>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              predictions.slice(0, 3).map(p => (
+                <div
+                  key={p.id}
+                  className={`dashboard-activity-item ${
+                    p.severity === 'critical' ? 'status-error' : 'status-warning'
+                  }`}
+                >
+                  <div className="dashboard-activity-icon">
+                    <FiAlertCircle className="dashboard-status-icon" />
+                  </div>
+                  <div className="dashboard-activity-content">
+                    <p className="dashboard-activity-title">{p.service}</p>
+                    <div className="dashboard-activity-meta">
+                      <span>{p.prediction}</span>
+                      <span className="dashboard-activity-dot"></span>
+                      <span>{p.timeframe}</span>
+                    </div>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* Cost Optimizer */}
+        <div className="dashboard-card">
+          <div className="dashboard-card-header">
+            <h3 className="dashboard-card-title">
+              <FiDollarSign style={{ color: '#10b981', marginRight: 8, display: 'inline' }} />
+              Cost Optimizer
+            </h3>
+            <button className="dashboard-card-view-all">Savings</button>
+          </div>
+          <div className="dashboard-activity-list">
+            {costSavings.length === 0 ? (
+              <div className="dashboard-activity-item status-success">
+                <div className="dashboard-activity-icon">
+                  <FiCheckCircle className="dashboard-status-icon" />
+                </div>
+                <div className="dashboard-activity-content">
+                  <p className="dashboard-activity-title">No optimizations found</p>
+                  <div className="dashboard-activity-meta">
+                    <span>Costs already optimal</span>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              costSavings.slice(0, 3).map(c => (
+                <div key={c.id} className="dashboard-activity-item status-success">
+                  <div className="dashboard-activity-icon">
+                    <FiDollarSign className="dashboard-status-icon" />
+                  </div>
+                  <div className="dashboard-activity-content">
+                    <p className="dashboard-activity-title">{c.service}</p>
+                    <div className="dashboard-activity-meta">
+                      <span>{c.suggestion}</span>
+                    </div>
+                  </div>
+                  <span className="dashboard-activity-status">{c.estimated_savings}</span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ============ HIGH-PERFORMANCE METRICS ============ */}
+      <div className="dashboard-card">
+        <h3 className="dashboard-card-title">High-Performance Metrics</h3>
+        <div className="dashboard-system-stats-grid">
+          <div className="dashboard-system-stat">
+            <p className="dashboard-system-stat-label">Throughput</p>
+            <p className="dashboard-system-stat-value">{highPerf.requests_per_sec || 0} req/s</p>
+            <div className="dashboard-system-stat-bar">
+              <div
+                className="dashboard-system-stat-bar-fill dashboard-system-stat-bar-fill-primary"
+                style={{ width: `${Math.min(100, (highPerf.requests_per_sec || 0) / 10)}%` }}
+              ></div>
+            </div>
+          </div>
+          <div className="dashboard-system-stat">
+            <p className="dashboard-system-stat-label">P95 Latency</p>
+            <p className="dashboard-system-stat-value">{highPerf.p95_latency_ms || 0} ms</p>
+            <div className="dashboard-system-stat-bar">
+              <div
+                className="dashboard-system-stat-bar-fill dashboard-system-stat-bar-fill-warning"
+                style={{ width: `${Math.min(100, highPerf.p95_latency_ms || 0)}%` }}
+              ></div>
+            </div>
+          </div>
+          <div className="dashboard-system-stat">
+            <p className="dashboard-system-stat-label">P99 Latency</p>
+            <p className="dashboard-system-stat-value">{highPerf.p99_latency_ms || 0} ms</p>
+            <div className="dashboard-system-stat-bar">
+              <div
+                className="dashboard-system-stat-bar-fill dashboard-system-stat-bar-fill-info"
+                style={{ width: `${Math.min(100, highPerf.p99_latency_ms || 0)}%` }}
+              ></div>
+            </div>
+          </div>
+          <div className="dashboard-system-stat">
+            <p className="dashboard-system-stat-label">Cache Hit</p>
+            <p className="dashboard-system-stat-value">{highPerf.cache_hit_pct || 0}%</p>
+            <div className="dashboard-system-stat-bar">
+              <div
+                className="dashboard-system-stat-bar-fill dashboard-system-stat-bar-fill-success"
+                style={{ width: `${highPerf.cache_hit_pct || 0}%` }}
+              ></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ============ SERVICES ============ */}
+      <div className="dashboard-card">
+        <div className="dashboard-card-header">
+          <h3 className="dashboard-card-title">Services ({services.length})</h3>
+          <button className="dashboard-card-view-all" onClick={handleRefresh}>
+            Auto-refresh 15s
+          </button>
+        </div>
+        <div className="dashboard-activity-list">
+          {services.length === 0 ? (
+            <div className="dashboard-activity-item status-info">
+              <div className="dashboard-activity-icon">
+                <FiServer className="dashboard-status-icon" />
+              </div>
+              <div className="dashboard-activity-content">
+                <p className="dashboard-activity-title">No services yet</p>
+                <div className="dashboard-activity-meta">
+                  <span>Deploy apps in AI Assistant or Pipelines — they will appear here</span>
+                </div>
+              </div>
+            </div>
+          ) : (
+            services.slice(0, 8).map((svc, i) => (
+              <motion.div
+                key={`${svc.service_name}-${i}`}
+                initial={{ opacity: 0, x: -10 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ delay: i * 0.03 }}
+                className={`dashboard-activity-item ${
+                  svc.status === 'running' || svc.status === 'monitored' ? 'status-success' :
+                  svc.status === 'failed' ? 'status-error' :
+                  svc.status === 'stopped' ? 'status-error' : 'status-warning'
+                }`}
+              >
+                <div className="dashboard-activity-icon">
+                  <FiServer className="dashboard-status-icon" />
+                </div>
+                <div className="dashboard-activity-content">
+                  <p className="dashboard-activity-title">
+                    {svc.display_name || svc.service_name}
+                  </p>
+                  <div className="dashboard-activity-meta">
+                    <span>CPU {svc.cpu_percent || 0}%</span>
+                    <span className="dashboard-activity-dot"></span>
+                    <span>Mem {svc.memory_percent || 0}%</span>
+                    <span className="dashboard-activity-dot"></span>
+                    <span>{svc.replicas || 1} replicas</span>
+                  </div>
+                </div>
+                <span className="dashboard-activity-status">{svc.status}</span>
+              </motion.div>
+            ))
+          )}
+        </div>
+      </div>
+
+      {/* ============ VERSION ============ */}
+      <div className="dashboard-version-info">
+        Smart DevOps Assistant v2.3.1 • Infrastructure • {new Date().toLocaleTimeString()}
+      </div>
+
+      {/* ============ CHAT FAB ============ */}
+      <button
+        onClick={() => setChatOpen(!chatOpen)}
+        title="Ask Infra AI"
+        className="infra-chat-fab"
+      >
+        <FaRobot />
+      </button>
+
+      <AnimatePresence>
+        {chatOpen && (
+          <motion.div
+            initial={{ opacity: 0, y: 20, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 20, scale: 0.95 }}
+            className="infra-chat-panel"
+          >
+            <div className="infra-chat-header">
+              <div className="infra-chat-title">
+                <FaRobot /> Infra AI
+              </div>
+              <button className="infra-chat-close" onClick={() => setChatOpen(false)}>
+                <FiXCircle />
+              </button>
+            </div>
+            <div className="infra-chat-messages">
+              {chatMessages.map((m, i) => (
+                <div key={i} className={`infra-chat-msg ${m.role}`}>
+                  <div className="infra-chat-bubble">{m.content}</div>
+                  <div className="infra-chat-time">{m.timestamp}</div>
+                </div>
+              ))}
+              {chatLoading && (
+                <div className="infra-chat-msg assistant">
+                  <div className="infra-chat-bubble">thinking...</div>
+                </div>
+              )}
+            </div>
+            <div className="infra-chat-input-area">
+              <input
+                type="text"
+                value={chatInput}
+                onChange={e => setChatInput(e.target.value)}
+                onKeyDown={handleChatKey}
+                placeholder="Ask about scaling, performance..."
+                disabled={chatLoading}
+              />
+              <button onClick={handleChatSend} disabled={!chatInput.trim() || chatLoading}>
+                <FiSend />
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+};
+
+export default InfraManager;

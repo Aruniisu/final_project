@@ -1,0 +1,434 @@
+"""
+DevOps API — REST endpoints for DevOps buttons
+================================================
+Backend endpoints for:
+- Deploy
+- Create Pipeline
+- List Deployments
+- Stop Deployment (keeps in registry)
+- Delete Deployment (permanent removal)
+- Security Scan
+- Monitor
+- Auto-Fix
+- Analyze
+- Fix Code (user-provided)
+- Status
+- Health
+"""
+
+import os
+import time
+import traceback
+from datetime import datetime
+from flask import Blueprint, request, jsonify
+
+# Create blueprint
+devops_bp = Blueprint('devops', __name__)
+
+# Lazy load orchestrator
+_orchestrator = None
+
+
+def get_orchestrator():
+    """Lazy init orchestrator."""
+    global _orchestrator
+    if _orchestrator is None:
+        try:
+            from agents.orchestrator import Orchestrator
+            _orchestrator = Orchestrator()
+            print("✅ Orchestrator initialized for DevOps API")
+        except Exception as e:
+            print(f"❌ Orchestrator init failed: {e}")
+            traceback.print_exc()
+            return None
+    return _orchestrator
+
+
+# ============================================
+# 🚀 DEPLOY
+# ============================================
+@devops_bp.route('/deploy', methods=['POST', 'OPTIONS'])
+def deploy():
+    """Deploy an app from GitHub."""
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    data = request.get_json() or {}
+    repo_url = data.get('repo_url')
+    project_name = data.get('project_name', 'default')
+    deploy_type = data.get('deploy_type', 'auto')
+    deploy_method = data.get('deploy_method', 'self-host')
+    provider = data.get('provider', 'auto')
+
+    if not repo_url:
+        return jsonify({'success': False, 'error': 'repo_url required'}), 400
+
+    orch = get_orchestrator()
+    if not orch:
+        return jsonify({'success': False, 'error': 'Orchestrator not available'}), 500
+
+    try:
+        result = orch.process({
+            'action': 'deploy',
+            'repo_url': repo_url,
+            'project_name': project_name,
+            'deploy_type': deploy_type,
+            'deploy_method': deploy_method,
+            'provider': provider,
+            'fullstack': deploy_type in ('auto', 'fullstack'),
+        })
+
+        return jsonify(result)
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================
+# ⚙️ CREATE PIPELINE
+# ============================================
+@devops_bp.route('/pipeline', methods=['POST', 'OPTIONS'])
+def create_pipeline():
+    """Create CI/CD pipeline."""
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    data = request.get_json() or {}
+    repo_url = data.get('repo_url')
+    deploy_method = data.get('deploy_method', 'self-host')
+    max_attempts = data.get('max_fix_attempts', 50)
+    auto_deploy = data.get('auto_deploy', True)
+
+    if not repo_url:
+        return jsonify({'success': False, 'error': 'repo_url required'}), 400
+
+    orch = get_orchestrator()
+    if not orch:
+        return jsonify({'success': False, 'error': 'Orchestrator not available'}), 500
+
+    try:
+        result = orch.process({
+            'action': 'pipeline',
+            'repo_url': repo_url,
+            'deploy_method': deploy_method,
+            'max_fix_attempts': max_attempts,
+            'auto_deploy': auto_deploy,
+        })
+
+        return jsonify(result)
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================
+# 🔒 SECURITY SCAN
+# ============================================
+@devops_bp.route('/scan', methods=['POST', 'OPTIONS'])
+def security_scan():
+    """Run security scan."""
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    data = request.get_json() or {}
+    repo_url = data.get('repo_url')
+    scan_type = data.get('scan_type', 'full')
+
+    if not repo_url:
+        return jsonify({'success': False, 'error': 'repo_url required'}), 400
+
+    orch = get_orchestrator()
+    if not orch:
+        return jsonify({'success': False, 'error': 'Orchestrator not available'}), 500
+
+    try:
+        result = orch.process({
+            'action': 'scan',
+            'repo_url': repo_url,
+            'scan_type': scan_type,
+        })
+
+        return jsonify(result)
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================
+# 📊 MONITOR
+# ============================================
+@devops_bp.route('/monitor', methods=['POST', 'OPTIONS'])
+def monitor():
+    """Monitor a URL."""
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    data = request.get_json() or {}
+    url = data.get('url')
+
+    if not url:
+        return jsonify({'success': False, 'error': 'url required'}), 400
+
+    orch = get_orchestrator()
+    if not orch:
+        return jsonify({'success': False, 'error': 'Orchestrator not available'}), 500
+
+    try:
+        result = orch.process({
+            'action': 'monitor',
+            'url': url,
+        })
+
+        return jsonify(result)
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================
+# 🩺 AUTO-FIX
+# ============================================
+@devops_bp.route('/fix', methods=['POST', 'OPTIONS'])
+def auto_fix():
+    """Auto-fix errors."""
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    data = request.get_json() or {}
+    repo_url = data.get('repo_url')
+    error_message = data.get('error_message', '')
+    error_logs = data.get('error_logs', '')
+
+    if not repo_url:
+        return jsonify({'success': False, 'error': 'repo_url required'}), 400
+
+    orch = get_orchestrator()
+    if not orch:
+        return jsonify({'success': False, 'error': 'Orchestrator not available'}), 500
+
+    try:
+        result = orch.process({
+            'action': 'fix',
+            'repo_url': repo_url,
+            'error_message': error_message,
+            'error_logs': error_logs,
+        })
+
+        return jsonify(result)
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================
+# 📋 ANALYZE
+# ============================================
+@devops_bp.route('/analyze', methods=['POST', 'OPTIONS'])
+def analyze():
+    """Analyze repo."""
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    data = request.get_json() or {}
+    repo_url = data.get('repo_url')
+
+    if not repo_url:
+        return jsonify({'success': False, 'error': 'repo_url required'}), 400
+
+    orch = get_orchestrator()
+    if not orch:
+        return jsonify({'success': False, 'error': 'Orchestrator not available'}), 500
+
+    try:
+        result = orch.process({
+            'action': 'analyze',
+            'repo_url': repo_url,
+        })
+
+        return jsonify(result)
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================
+# 🎯 FIX CODE (user-provided code snippet)
+# ============================================
+@devops_bp.route('/fix-code', methods=['POST', 'OPTIONS'])
+def fix_code():
+    """Fix user-provided code snippet."""
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    data = request.get_json() or {}
+    code = data.get('code', '')
+    error = data.get('error', '')
+    language = data.get('language')
+
+    if not code:
+        return jsonify({'success': False, 'error': 'code required'}), 400
+
+    orch = get_orchestrator()
+    if not orch:
+        return jsonify({'success': False, 'error': 'Orchestrator not available'}), 500
+
+    try:
+        result = orch.process({
+            'action': 'fix_code',
+            'code': code,
+            'error': error,
+            'language': language,
+        })
+
+        return jsonify(result)
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================
+# 📊 STATUS
+# ============================================
+@devops_bp.route('/status', methods=['GET', 'OPTIONS'])
+def status():
+    """Get agent + system status."""
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    try:
+        orch = get_orchestrator()
+        if not orch:
+            return jsonify({'success': False, 'error': 'Orchestrator not available'}), 500
+
+        agent_status = {}
+        for name, agent in orch.agents.items():
+            try:
+                agent_status[name] = {
+                    'name': agent.name,
+                    'state': 'ready' if not agent.is_busy else 'busy',
+                    'metrics': agent.get_metrics(),
+                }
+            except Exception:
+                agent_status[name] = {'name': agent.name, 'state': 'unknown'}
+
+        deployments = {}
+        try:
+            if orch.self_host:
+                deployments = orch.self_host.list_deployments()
+        except Exception:
+            pass
+
+        return jsonify({
+            'success': True,
+            'orchestrator': {
+                'name': orch.name,
+                'agents_count': len(orch.agents),
+                'metrics': orch.get_metrics(),
+            },
+            'agents': agent_status,
+            'deployments': deployments,
+            'deployment_count': len(deployments),
+            'timestamp': datetime.now().isoformat(),
+        })
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================
+# 📋 LIST DEPLOYMENTS
+# ============================================
+@devops_bp.route('/deployments', methods=['GET', 'OPTIONS'])
+def list_deployments():
+    """List all deployments (pipeline format)."""
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    try:
+        orch = get_orchestrator()
+        if not orch or not orch.self_host:
+            return jsonify({
+                'success': True,
+                'deployments': {},
+                'count': 0,
+            })
+
+        deployments = orch.self_host.list_deployments()
+
+        return jsonify({
+            'success': True,
+            'deployments': deployments,
+            'count': len(deployments),
+        })
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e), 'deployments': {}, 'count': 0}), 500
+
+
+# ============================================
+# 🛑 STOP DEPLOY (keeps in registry with status=stopped)
+# ============================================
+@devops_bp.route('/stop-deploy/<deploy_id>', methods=['POST', 'OPTIONS'])
+def stop_deploy(deploy_id):
+    """Stop a deployment (keeps in registry with status=stopped)."""
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    try:
+        orch = get_orchestrator()
+        if not orch or not orch.self_host:
+            return jsonify({'success': False, 'error': 'Self-host not available'}), 500
+
+        result = orch.self_host.stop_deployment(deploy_id)
+        return jsonify(result)
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================
+# 🗑️ DELETE DEPLOY (permanent removal)
+# ============================================
+@devops_bp.route('/delete-deploy/<deploy_id>', methods=['POST', 'OPTIONS', 'DELETE'])
+def delete_deploy(deploy_id):
+    """Permanently delete a deployment (stop + remove from registry + cleanup)."""
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    try:
+        orch = get_orchestrator()
+        if not orch or not orch.self_host:
+            return jsonify({'success': False, 'error': 'Self-host not available'}), 500
+
+        # Use delete_deployment (not stop_deployment)
+        result = orch.self_host.delete_deployment(deploy_id)
+        return jsonify(result)
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================
+# 💚 HEALTH CHECK
+# ============================================
+@devops_bp.route('/health', methods=['GET', 'OPTIONS'])
+def health():
+    """Health check endpoint."""
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': datetime.now().isoformat(),
+    })

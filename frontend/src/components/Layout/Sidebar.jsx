@@ -4,8 +4,6 @@ import { motion } from 'framer-motion';
 import { useAuth } from '../../context/AuthContext';
 import {
   FiHome,
-  FiMessageSquare,
-  FiUpload,
   FiGitBranch,
   FiActivity,
   FiCpu,
@@ -38,7 +36,13 @@ const Sidebar = ({ isOpen, onClose }) => {
     onClose();
   };
 
-  const isActive = (path) => location.pathname === path;
+  // ⭐ Match nested routes too (e.g. /pipelines/123 highlights Pipelines)
+  const isActive = (path) => {
+    if (path === '/dashboard') {
+      return location.pathname === '/dashboard' || location.pathname === '/';
+    }
+    return location.pathname === path || location.pathname.startsWith(path + '/');
+  };
 
   return (
     <>
@@ -92,7 +96,7 @@ const Sidebar = ({ isOpen, onClose }) => {
                     layoutId="activeIndicator"
                     className="ml-auto w-1.5 h-8 bg-white rounded-full"
                     initial={false}
-                    transition={{ type: "spring", stiffness: 300, damping: 30 }}
+                    transition={{ type: 'spring', stiffness: 300, damping: 30 }}
                   />
                 )}
               </Link>
@@ -109,7 +113,7 @@ const Sidebar = ({ isOpen, onClose }) => {
             <FiLogOut className="w-5 h-5" />
             <span className="font-medium text-sm">Logout</span>
           </button>
-          
+
           <div className="mt-3 p-3 rounded-xl bg-gradient-to-br from-primary-500/10 to-accent-500/10 border border-primary-500/20 dark:border-primary-400/20">
             <p className="text-xs text-slate-600 dark:text-slate-300">
               <span className="font-semibold">v2.3.1</span> • Auto-upgrade enabled

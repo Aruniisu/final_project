@@ -1,0 +1,222 @@
+Folder PATH listing
+Volume serial number is 3E69-245A
+D:.
+|   .env
+|   .env.example
+|   celery_worker.py
+|   docker-compose.yml
+|   Dockerfile.yml
+|   gunicorn.conf.py
+|   requirements.txt
+|   structure.txt
+|   test_api.py
+|   test_system.py
+|   
+\---src
+    |   .env
+    |   app.py
+    |   app.py.backup
+    |   routes.py
+    |   test_db.py
+    |   test_orchestrator.py
+    |   
+    +---agents
+    |   |   analyzer_agent.py
+    |   |   auto_upgrader.py
+    |   |   base_agent.py
+    |   |   cicd_agent.py
+    |   |   executor_agent.py
+    |   |   infra_agent.py
+    |   |   init.py
+    |   |   orchestrator.py
+    |   |   orchestrator.py.old
+    |   |   planner_agent.py
+    |   |   self_healing_agent.py
+    |   |   
+    |   +---specialists
+    |   |   |   deploy_agent.py
+    |   |   |   healer_agent.py
+    |   |   |   monitor_agent.py
+    |   |   |   pipeline_agent.py
+    |   |   |   pipeline_agent.py.short_version
+    |   |   |   security_agent.py
+    |   |   |   __init__.py
+    |   |   |   
+    |   |   \---__pycache__
+    |   |           deploy_agent.cpython-311.pyc
+    |   |           healer_agent.cpython-311.pyc
+    |   |           monitor_agent.cpython-311.pyc
+    |   |           pipeline_agent.cpython-311.pyc
+    |   |           security_agent.cpython-311.pyc
+    |   |           __init__.cpython-311.pyc
+    |   |           
+    |   +---tools
+    |   |   |   deploy_tools.py
+    |   |   |   github_tools.py
+    |   |   |   tool_registry.py
+    |   |   |   __init__.py
+    |   |   |   
+    |   |   +---tools
+    |   |   |       tool_registry.py
+    |   |   |       __init__.py
+    |   |   |       
+    |   |   \---__pycache__
+    |   |           deploy_tools.cpython-311.pyc
+    |   |           github_tools.cpython-311.pyc
+    |   |           tool_registry.cpython-311.pyc
+    |   |           __init__.cpython-311.pyc
+    |   |           
+    |   +---workflows
+    |   |       auto_fix_workflow.py
+    |   |       __init__.py
+    |   |       
+    |   \---__pycache__
+    |           analyzer_agent.cpython-311.pyc
+    |           base_agent.cpython-311.pyc
+    |           orchestrator.cpython-311.pyc
+    |           planner_agent.cpython-311.pyc
+    |           
+    +---api
+    |   |   assistant.py
+    |   |   auth.py
+    |   |   infrastructure.py
+    |   |   init.py
+    |   |   monitoring.py
+    |   |   pipelines.py
+    |   |   settings.py
+    |   |   training.py
+    |   |   upload.py
+    |   |   
+    |   \---__pycache__
+    |           assistant.cpython-311.pyc
+    |           auth.cpython-311.pyc
+    |           infrastructure.cpython-311.pyc
+    |           monitoring.cpython-311.pyc
+    |           pipelines.cpython-311.pyc
+    |           settings.cpython-311.pyc
+    |           training.cpython-311.pyc
+    |           upload.cpython-311.pyc
+    |           
+    +---core
+    |   |   cache.py
+    |   |   config.py
+    |   |   init.py
+    |   |   logging.py
+    |   |   security.py
+    |   |   
+    |   \---__pycache__
+    |           cache.cpython-311.pyc
+    |           
+    +---database
+    |   |   connection.py
+    |   |   __init__.py
+    |   |   
+    |   +---managers
+    |   |   |   audit_manager.py
+    |   |   |   base_manager.py
+    |   |   |   deployment_manager.py
+    |   |   |   notification_manager.py
+    |   |   |   pipeline_manager.py
+    |   |   |   project_manager.py
+    |   |   |   training_manager.py
+    |   |   |   upload_manager.py
+    |   |   |   user_manager.py
+    |   |   |   __init__.py
+    |   |   |   
+    |   |   \---__pycache__
+    |   |           audit_manager.cpython-311.pyc
+    |   |           base_manager.cpython-311.pyc
+    |   |           deployment_manager.cpython-311.pyc
+    |   |           notification_manager.cpython-311.pyc
+    |   |           pipeline_manager.cpython-311.pyc
+    |   |           project_manager.cpython-311.pyc
+    |   |           training_manager.cpython-311.pyc
+    |   |           upload_manager.cpython-311.pyc
+    |   |           user_manager.cpython-311.pyc
+    |   |           __init__.cpython-311.pyc
+    |   |           
+    |   +---migrations
+    |   |       run_migrations.py
+    |   |       seed_data.py
+    |   |       __init__.py
+    |   |       
+    |   \---__pycache__
+    |           connection.cpython-311.pyc
+    |           __init__.cpython-311.pyc
+    |           
+    +---middleware
+    |   |   audit.py
+    |   |   auth.py
+    |   |   init.py
+    |   |   rate_limit.py
+    |   |   rbac.py
+    |   |   
+    |   \---__pycache__
+    |           auth.cpython-311.pyc
+    |           rate_limit.cpython-311.pyc
+    |           
+    +---models
+    |   |   audit_log.py
+    |   |   deployment.py
+    |   |   init.py
+    |   |   notification.py
+    |   |   pipeline.py
+    |   |   project.py
+    |   |   training.py
+    |   |   upload.py
+    |   |   user.py
+    |   |   
+    |   \---__pycache__
+    |           training.cpython-311.pyc
+    |           user.cpython-311.pyc
+    |           
+    +---services
+    |   |   analytics_service.py
+    |   |   auto_fix_service.py
+    |   |   docker_service.py
+    |   |   drive_service.py
+    |   |   file_processor.py
+    |   |   github_service.py
+    |   |   import smtplib.py
+    |   |   init.py
+    |   |   kubernetes_service.py
+    |   |   monitoring_service.py
+    |   |   multi_deploy_service.py
+    |   |   project_analyzer.py
+    |   |   real_deploy_service.py
+    |   |   terraform_service.py
+    |   |   __init__.py
+    |   |   
+    |   +---providers
+    |   |       buildah_provider.py
+    |   |       kaniko_provider.py
+    |   |       render_provider.py
+    |   |       vercel_provider.py
+    |   |       __init__.py
+    |   |       
+    |   \---__pycache__
+    |           project_analyzer.cpython-311.pyc
+    |           __init__.cpython-311.pyc
+    |           
+    +---tasks
+    |       async_tasks.py
+    |       celery_app.py
+    |       scheduled_tasks.py
+    |       
+    +---tools
+    |       docker_tools.py
+    |       git_tools.py
+    |       __init__.py
+    |       
+    +---uploads
+    +---utils
+    |       decorators.py
+    |       file_utils.py
+    |       helpers.py
+    |       validators.py
+    |       
+    \---websocket
+            events.py
+            init.py
+            socket_handler.py
+            

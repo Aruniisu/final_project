@@ -5,11 +5,14 @@ import toast from 'react-hot-toast';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { atomDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { actionAPI } from '../../api/assistant';
+import usePlatformEvents from '../../hooks/usePlatformEvents';
+import { useAuth } from '../../context/AuthContext';
 import './AssistantChat.css';
+import { APP_VERSION } from '../../config/version';
 
-// Icons
 import {
-  FaRobot, FaPaperPlane, FaMicrophone, FaSpinner,
+  FaRobot, FaPaperPlane, FaMicrophone, FaStop, FaSpinner,
   FaCheckCircle, FaTimesCircle, FaCopy, FaDownload,
   FaCode, FaFolderOpen, FaRocket, FaBug, FaShieldAlt,
   FaCloud, FaTrash, FaClock, FaTerminal, FaGithub,
@@ -19,14 +22,9 @@ import {
 import { FiZap, FiActivity } from 'react-icons/fi';
 import { BsLightningCharge } from 'react-icons/bs';
 
-// ============================================
-// Config
-// ============================================
 const WS_URL = process.env.REACT_APP_WS_URL || 'http://localhost:5000';
+const PROJECTS_STORAGE_KEY = 'smartdevops.projects.v1';
 
-// ============================================
-// Download utility
-// ============================================
 const downloadFile = (content, filename, type = 'text/plain') => {
   try {
     const blob = new Blob([content], { type });
@@ -38,15 +36,36 @@ const downloadFile = (content, filename, type = 'text/plain') => {
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
-    toast.success(`✅ Downloaded: ${filename}`);
+    toast.success(`Downloaded: ${filename}`);
   } catch {
-    toast.error('❌ Download failed');
+    toast.error('Download failed');
   }
 };
 
-// ============================================
-// Message Component
-// ============================================
+// ═══════════════════════════════════════════════════════════
+// localStorage helpers
+// ═══════════════════════════════════════════════════════════
+const loadProjectsFromStorage = () => {
+  try {
+    const raw = localStorage.getItem(PROJECTS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed;
+  } catch (e) {
+    console.warn('Failed to load projects:', e);
+    return [];
+  }
+};
+
+const saveProjectsToStorage = (projects) => {
+  try {
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+  } catch (e) {
+    console.warn('Failed to save projects:', e);
+  }
+};
+
 const Message = ({ message, content, isUser, timestamp, execution }) => {
   const [copied, setCopied] = useState(false);
   const text = (message ?? content ?? '').toString();
@@ -55,7 +74,7 @@ const Message = ({ message, content, isUser, timestamp, execution }) => {
     try {
       await navigator.clipboard.writeText(text);
       setCopied(true);
-      toast.success('📋 Copied!');
+      toast.success('Copied!');
       setTimeout(() => setCopied(false), 2000);
     } catch {
       toast.error('Copy failed');
@@ -87,10 +106,8 @@ const Message = ({ message, content, isUser, timestamp, execution }) => {
                         yaml: 'yaml', yml: 'yml',
                         json: 'json', html: 'html', css: 'css',
                         bash: 'sh', sh: 'sh', shell: 'sh',
-                        dockerfile: 'Dockerfile',
                       };
                       const ext = extMap[match[1].toLowerCase()] || 'txt';
-
                       return (
                         <div className="code-block">
                           <div className="code-header">
@@ -112,7 +129,7 @@ const Message = ({ message, content, isUser, timestamp, execution }) => {
                 {text}
               </ReactMarkdown>
             ) : (
-              <p style={{ opacity: 0.4, fontStyle: 'italic' }}>(empty message)</p>
+              <p style={{ opacity: 0.4, fontStyle: 'italic' }}>(empty)</p>
             )}
           </div>
 
@@ -166,9 +183,6 @@ const Message = ({ message, content, isUser, timestamp, execution }) => {
   );
 };
 
-// ============================================
-// Live Terminal
-// ============================================
 const LiveTerminal = ({ logs, onClear, onExport }) => {
   const [filter, setFilter] = useState('all');
   const [autoScroll, setAutoScroll] = useState(true);
@@ -192,11 +206,15 @@ const LiveTerminal = ({ logs, onClear, onExport }) => {
           <span className="live-badge">● Live</span>
         </div>
         <div className="terminal-actions">
-          <button onClick={() => setIsPaused(!isPaused)}>
+          <button onClick={() => setIsPaused(!isPaused)} title={isPaused ? 'Resume' : 'Pause'}>
             {isPaused ? <FaPlay /> : <FaPause />}
           </button>
-          <button onClick={onExport}><FaDownload /></button>
-          <button onClick={onClear}><FaTrash /></button>
+          <button onClick={onExport} title="Download logs">
+            <FaDownload />
+          </button>
+          <button onClick={onClear} title="Clear logs">
+            <FaTrash />
+          </button>
         </div>
       </div>
       <div className="terminal-stats">
@@ -238,234 +256,438 @@ const LiveTerminal = ({ logs, onClear, onExport }) => {
   );
 };
 
-// ============================================
-// Add Project Modal
-// ============================================
-const AddProjectModal = ({ isOpen, onClose, onAdd }) => {
-  const [method, setMethod] = useState('github');
+const DeployModal = ({ isOpen, onClose, onRun, project }) => {
   const [repoUrl, setRepoUrl] = useState('');
-  const [projectName, setProjectName] = useState('');
-  const [liveUrl, setLiveUrl] = useState('');
-  const [template, setTemplate] = useState('react-node');
+  const [deployType, setDeployType] = useState('auto');
+  const [autoFix, setAutoFix] = useState(true);
+
+  useEffect(() => {
+    if (isOpen) setRepoUrl(project?.repoUrl || '');
+  }, [isOpen, project]);
 
   if (!isOpen) return null;
 
-  const methods = [
-    { v: 'github', l: 'GitHub', i: FaGithub },
-    { v: 'git', l: 'Git URL', i: FaGitAlt },
-    { v: 'live', l: 'Live URL', i: FaGlobe },
-    { v: 'template', l: 'Template', i: FaLayerGroup },
-    { v: 'blank', l: 'Blank', i: FaCode },
+  const types = [
+    { v: 'auto', l: 'Auto Detect' },
+    { v: 'frontend', l: 'Frontend' },
+    { v: 'backend', l: 'Backend' },
+    { v: 'fullstack', l: 'Full Stack' },
   ];
 
-  const handleSubmit = () => {
-    if (method === 'github' || method === 'git') {
-      if (!repoUrl.trim()) {
-        toast.error('Please enter repo URL');
-        return;
-      }
-      const name = projectName.trim() || repoUrl.split('/').pop().replace('.git', '') || 'Repo Project';
-      onAdd({
-        projectId: `${method}-${Date.now()}`,
-        projectName: name,
-        source: method,
-        repoUrl,
-        analysis: { healthScore: null },
-      });
-    } else if (method === 'live') {
-      if (!liveUrl.trim()) {
-        toast.error('Please enter live URL');
-        return;
-      }
-      let name = projectName.trim();
-      if (!name) {
-        try { name = new URL(liveUrl).hostname; } catch { name = 'Live Project'; }
-      }
-      onAdd({
-        projectId: `live-${Date.now()}`,
-        projectName: name,
-        source: 'live',
-        liveUrl,
-        analysis: { healthScore: null },
-      });
-    } else if (method === 'template') {
-      onAdd({
-        projectId: `tpl-${Date.now()}`,
-        projectName: projectName.trim() || `${template} App`,
-        source: 'template',
-        template,
-        analysis: { healthScore: 100 },
-      });
-    } else {
-      onAdd({
-        projectId: `blank-${Date.now()}`,
-        projectName: projectName.trim() || 'New Project',
-        source: 'blank',
-        analysis: { healthScore: 100 },
-      });
-    }
+  const handleRun = () => {
+    if (!repoUrl.trim()) return toast.error('GitHub URL required');
+    if (!repoUrl.includes('github.com')) return toast.error('Only GitHub URLs');
+    onRun({ repoUrl: repoUrl.trim(), deployType, autoFix });
   };
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <motion.div
-        initial={{ opacity: 0, scale: 0.9 }}
-        animate={{ opacity: 1, scale: 1 }}
-        className="modal-content"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h3><FaFolderOpen /> Add Project</h3>
-        <p className="modal-sub">Upload is optional — pick any method</p>
+      <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }}
+        className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <h3><FaRocket /> Deploy to Self-Host</h3>
+        <p className="modal-sub">Deploy to agent's own infrastructure</p>
+
+        <div style={{
+          padding: '10px 14px', background: 'rgba(16,185,129,0.08)',
+          border: '1px solid rgba(16,185,129,0.2)', borderRadius: '8px',
+          marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '10px',
+        }}>
+          <FaRobot style={{ fontSize: '20px', color: '#10b981' }} />
+          <div style={{ fontSize: '11px' }}>
+            <div style={{ fontWeight: 600, color: '#10b981' }}>Agent Self-Host</div>
+            <div style={{ opacity: 0.6, fontSize: '10px' }}>Zero cost • Cloudflare URL</div>
+          </div>
+        </div>
 
         <div className="modal-field">
-          <label>Method</label>
+          <label>📦 GitHub Repo URL <span style={{ color: '#ef4444' }}>*</span></label>
+          <input type="text" placeholder="https://github.com/user/repo"
+            value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} autoFocus />
+        </div>
+
+        <div className="modal-field">
+          <label>🎯 What to deploy</label>
           <div className="radio-group" style={{ flexWrap: 'wrap' }}>
-            {methods.map(({ v, l, i: Icon }) => (
-              <button key={v} className={method === v ? 'active' : ''} onClick={() => setMethod(v)}
-                style={{ minWidth: '80px', fontSize: '10px' }}>
-                <Icon /> {l}
+            {types.map(({ v, l }) => (
+              <button key={v} className={deployType === v ? 'active' : ''}
+                onClick={() => setDeployType(v)} style={{ minWidth: '90px' }}>
+                {l}
               </button>
             ))}
           </div>
         </div>
 
-        {(method === 'github' || method === 'git') && (
-          <div className="modal-field">
-            <label>Repository URL</label>
-            <input type="text"
-              placeholder={method === 'github' ? 'https://github.com/user/repo' : 'https://gitlab.com/user/repo.git'}
-              value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} autoFocus />
-          </div>
-        )}
-
-        {method === 'live' && (
-          <div className="modal-field">
-            <label>Live URL</label>
-            <input type="text" placeholder="https://myapp.vercel.app"
-              value={liveUrl} onChange={(e) => setLiveUrl(e.target.value)} autoFocus />
-          </div>
-        )}
-
-        {method === 'template' && (
-          <div className="modal-field">
-            <label>Template</label>
-            <select value={template} onChange={(e) => setTemplate(e.target.value)}>
-              <option value="react-node">React + Node.js</option>
-              <option value="nextjs">Next.js Full-Stack</option>
-              <option value="python-flask">Python Flask API</option>
-              <option value="static">Static HTML/CSS/JS</option>
-              <option value="django">Django + PostgreSQL</option>
-              <option value="mern">MERN Stack</option>
-            </select>
-          </div>
-        )}
-
         <div className="modal-field">
-          <label>Project Name (optional)</label>
-          <input type="text" placeholder="My Awesome Project"
-            value={projectName} onChange={(e) => setProjectName(e.target.value)} />
+          <label style={{
+            textTransform: 'none', letterSpacing: 0, display: 'flex',
+            alignItems: 'center', gap: '8px', cursor: 'pointer',
+          }}>
+            <input type="checkbox" checked={autoFix} onChange={(e) => setAutoFix(e.target.checked)} />
+            🩺 Auto-fix code errors
+          </label>
         </div>
 
         <div className="modal-actions">
           <button onClick={onClose}>Cancel</button>
-          <button className="primary" onClick={handleSubmit}>
-            <FaRocket /> Add Project
-          </button>
+          <button className="primary" onClick={handleRun}><FaRocket /> Deploy</button>
         </div>
       </motion.div>
     </div>
   );
 };
 
-// ============================================
-// Deploy Modal
-// ============================================
-const DeployModal = ({ isOpen, onClose, project, onDeploy }) => {
-  const [deployType, setDeployType] = useState('fullstack');
-  const [provider, setProvider] = useState('auto');
-  const [autoFix, setAutoFix] = useState(true);
+const PipelineModal = ({ isOpen, onClose, onRun, project }) => {
   const [repoUrl, setRepoUrl] = useState('');
+  const [maxAttempts, setMaxAttempts] = useState(50);
+  const [autoDeploy, setAutoDeploy] = useState(false);
 
-  // ⭐ Pre-fill repoUrl when project changes
   useEffect(() => {
-    if (project?.repoUrl) {
-      setRepoUrl(project.repoUrl);
+    if (isOpen) {
+      setRepoUrl(project?.repoUrl || '');
+      setMaxAttempts(50);
+      setAutoDeploy(false);
     }
-  }, [project]);
+  }, [isOpen, project]);
 
   if (!isOpen) return null;
 
-  const handleDeployClick = () => {
-    if (!repoUrl.trim()) {
-      toast.error('Please enter a GitHub repo URL');
-      return;
-    }
-    onDeploy({ deployType, provider, autoFix, repoUrl: repoUrl.trim() });
-    onClose();
+  const handleRun = () => {
+    if (!repoUrl.trim()) return toast.error('GitHub URL required');
+    if (!repoUrl.includes('github.com')) return toast.error('Only GitHub URLs');
+    onRun({ repoUrl: repoUrl.trim(), maxAttempts, autoDeploy });
   };
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <motion.div
-        initial={{ opacity: 0, scale: 0.9 }}
-        animate={{ opacity: 1, scale: 1 }}
-        className="modal-content"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h3><FaRocket /> Deploy Project</h3>
-        <p className="modal-sub">Configure deployment for <b>{project?.projectName || 'your project'}</b></p>
+      <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }}
+        className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <h3>⚙️ Create CI/CD Pipeline</h3>
+        <p className="modal-sub">Generate GitHub Actions workflow</p>
 
         <div className="modal-field">
-          <label>Deploy Type</label>
-          <div className="radio-group">
-            {[
-              { v: 'frontend', l: 'Frontend', i: FaGlobe },
-              { v: 'backend', l: 'Backend', i: FaServer },
-              { v: 'fullstack', l: 'Full Stack', i: FaLayerGroup },
-            ].map(({ v, l, i: Icon }) => (
-              <button key={v} className={deployType === v ? 'active' : ''} onClick={() => setDeployType(v)}>
-                <Icon /> {l}
-              </button>
-            ))}
-          </div>
+          <label>📦 GitHub Repo URL <span style={{ color: '#ef4444' }}>*</span></label>
+          <input type="text" placeholder="https://github.com/user/repo"
+            value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} autoFocus />
         </div>
 
         <div className="modal-field">
-          <label>Build Method (No local Docker needed)</label>
-          <select value={provider} onChange={(e) => setProvider(e.target.value)}>
-            <option value="auto">🤖 Auto-detect (Recommended)</option>
-            <option value="vercel">▲ Vercel (Frontend)</option>
-            <option value="render">🎨 Render (Backend)</option>
-            <option value="kaniko">Kaniko (In-cluster build)</option>
-            <option value="buildah">Buildah (Daemonless)</option>
-          </select>
+          <label>🔁 Max Auto-Fix Attempts: <b>{maxAttempts}</b></label>
+          <input type="range" min="5" max="100" step="5"
+            value={maxAttempts} onChange={(e) => setMaxAttempts(parseInt(e.target.value))}
+            style={{ width: '100%' }} />
         </div>
 
         <div className="modal-field">
-          <label style={{ textTransform: 'none', letterSpacing: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <input type="checkbox" checked={autoFix} onChange={(e) => setAutoFix(e.target.checked)} />
-            Auto-fix code errors during deployment
+          <label style={{
+            textTransform: 'none', letterSpacing: 0, display: 'flex',
+            alignItems: 'center', gap: '8px', cursor: 'pointer',
+          }}>
+            <input type="checkbox" checked={autoDeploy} onChange={(e) => setAutoDeploy(e.target.checked)} />
+            🚀 Auto-deploy after pipeline passes
           </label>
         </div>
 
+        <div className="modal-actions">
+          <button onClick={onClose}>Cancel</button>
+          <button className="primary" onClick={handleRun}>⚙️ Create</button>
+        </div>
+      </motion.div>
+    </div>
+  );
+};
+
+const MonitorModal = ({ isOpen, onClose, onRun, project }) => {
+  const [repoUrl, setRepoUrl] = useState('');
+  const [url, setUrl] = useState('');
+
+  useEffect(() => {
+    if (isOpen) {
+      setRepoUrl(project?.repoUrl || '');
+      setUrl('');
+    }
+  }, [isOpen, project]);
+
+  if (!isOpen) return null;
+
+  const handleRun = () => {
+    if (!repoUrl.trim()) return toast.error('GitHub URL required');
+    if (!repoUrl.includes('github.com')) return toast.error('Only GitHub URLs');
+    onRun({ repoUrl: repoUrl.trim(), url: url.trim() });
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }}
+        className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <h3>📊 Monitor Service</h3>
+        <p className="modal-sub">Start real-time monitoring</p>
+
         <div className="modal-field">
-          <label>GitHub Repo URL ⭐ Required</label>
-          <input
-            type="text"
-            placeholder="https://github.com/user/repo"
-            value={repoUrl}
-            onChange={(e) => setRepoUrl(e.target.value)}
-            autoFocus
-          />
-          <p style={{ fontSize: '10px', color: 'rgba(255,255,255,0.4)', marginTop: '4px' }}>
-            💡 This will trigger a real Vercel deployment
+          <label>📦 GitHub Repo URL <span style={{ color: '#ef4444' }}>*</span></label>
+          <input type="text" placeholder="https://github.com/user/repo"
+            value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} autoFocus />
+        </div>
+
+        <div className="modal-field">
+          <label>🌐 Live URL (optional)</label>
+          <input type="text" placeholder="https://myapp.com"
+            value={url} onChange={(e) => setUrl(e.target.value)} />
+          <p style={{ fontSize: '10px', opacity: 0.5, marginTop: '4px' }}>
+            Leave empty to auto-detect from deployments
           </p>
         </div>
 
         <div className="modal-actions">
           <button onClick={onClose}>Cancel</button>
-          <button className="primary" onClick={handleDeployClick}>
-            <FaRocket /> Deploy Now
+          <button className="primary" onClick={handleRun}>📊 Monitor</button>
+        </div>
+      </motion.div>
+    </div>
+  );
+};
+
+const ScaleModal = ({ isOpen, onClose, onRun, project }) => {
+  const [repoUrl, setRepoUrl] = useState('');
+  const [service, setService] = useState('');
+  const [replicas, setReplicas] = useState(3);
+
+  useEffect(() => {
+    if (isOpen) {
+      setRepoUrl(project?.repoUrl || '');
+      const name = project?.projectName?.toLowerCase().replace(/\s+/g, '-') || '';
+      setService(name);
+      setReplicas(3);
+    }
+  }, [isOpen, project]);
+
+  if (!isOpen) return null;
+
+  const handleRun = () => {
+    if (!repoUrl.trim()) return toast.error('GitHub URL required');
+    if (!repoUrl.includes('github.com')) return toast.error('Only GitHub URLs');
+    onRun({ repoUrl: repoUrl.trim(), service, replicas });
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }}
+        className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <h3>📈 Scale Service</h3>
+        <p className="modal-sub">Adjust replica count</p>
+
+        <div className="modal-field">
+          <label>📦 GitHub Repo URL <span style={{ color: '#ef4444' }}>*</span></label>
+          <input type="text" placeholder="https://github.com/user/repo"
+            value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} autoFocus />
+        </div>
+
+        <div className="modal-field">
+          <label>Service name (auto)</label>
+          <input type="text" value={service}
+            onChange={(e) => setService(e.target.value)}
+            placeholder="auto from repo name" />
+        </div>
+
+        <div className="modal-field">
+          <label>Target replicas: <b>{replicas}</b></label>
+          <input type="range" min="1" max="10" value={replicas}
+            onChange={(e) => setReplicas(parseInt(e.target.value))}
+            style={{ width: '100%' }} />
+        </div>
+
+        <div className="modal-actions">
+          <button onClick={onClose}>Cancel</button>
+          <button className="primary" onClick={handleRun}>📈 Scale to {replicas}</button>
+        </div>
+      </motion.div>
+    </div>
+  );
+};
+
+const SecurityModal = ({ isOpen, onClose, onRun, project }) => {
+  const [repoUrl, setRepoUrl] = useState('');
+
+  useEffect(() => {
+    if (isOpen) setRepoUrl(project?.repoUrl || '');
+  }, [isOpen, project]);
+
+  if (!isOpen) return null;
+
+  const handleRun = () => {
+    if (!repoUrl.trim()) return toast.error('GitHub URL required');
+    if (!repoUrl.includes('github.com')) return toast.error('Only GitHub URLs');
+    onRun({ repoUrl: repoUrl.trim() });
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }}
+        className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <h3>🔒 Security Scan</h3>
+        <p className="modal-sub">Scan repo for vulnerabilities</p>
+
+        <div className="modal-field">
+          <label>📦 GitHub Repo URL <span style={{ color: '#ef4444' }}>*</span></label>
+          <input type="text" placeholder="https://github.com/user/repo"
+            value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} autoFocus />
+        </div>
+
+        <div className="modal-actions">
+          <button onClick={onClose}>Cancel</button>
+          <button className="primary" onClick={handleRun}>🔒 Scan</button>
+        </div>
+      </motion.div>
+    </div>
+  );
+};
+
+const FixCodeModal = ({ isOpen, onClose, onRun, project }) => {
+  const [repoUrl, setRepoUrl] = useState('');
+
+  useEffect(() => {
+    if (isOpen) setRepoUrl(project?.repoUrl || '');
+  }, [isOpen, project]);
+
+  if (!isOpen) return null;
+
+  const handleRun = () => {
+    if (!repoUrl.trim()) return toast.error('GitHub URL required');
+    if (!repoUrl.includes('github.com')) return toast.error('Only GitHub URLs');
+    onRun({ repoUrl: repoUrl.trim() });
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }}
+        className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <h3>🔧 Fix Code</h3>
+        <p className="modal-sub">Find & fix all errors — creates PR</p>
+
+        <div className="modal-field">
+          <label>📦 GitHub Repo URL <span style={{ color: '#ef4444' }}>*</span></label>
+          <input type="text" placeholder="https://github.com/user/repo"
+            value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} autoFocus />
+        </div>
+
+        <div style={{
+          padding: '10px 12px', background: 'rgba(168,85,247,0.08)',
+          border: '1px solid rgba(168,85,247,0.2)', borderRadius: '8px',
+          fontSize: '10px', color: 'rgba(255,255,255,0.7)', marginBottom: '12px',
+        }}>
+          💡 Agent will scan, fix errors, and create a PR for review
+        </div>
+
+        <div className="modal-actions">
+          <button onClick={onClose}>Cancel</button>
+          <button className="primary" onClick={handleRun}>🔧 Fix All</button>
+        </div>
+      </motion.div>
+    </div>
+  );
+};
+
+const AddProjectModal = ({ isOpen, onClose, onAdd, existingIds }) => {
+  const [method, setMethod] = useState('github');
+  const [repoUrl, setRepoUrl] = useState('');
+  const [projectName, setProjectName] = useState('');
+
+  useEffect(() => {
+    if (isOpen) {
+      setRepoUrl('');
+      setProjectName('');
+      setMethod('github');
+    }
+  }, [isOpen]);
+
+  if (!isOpen) return null;
+
+  const handleSubmit = () => {
+    const url = repoUrl.trim();
+    if (!url) return toast.error('Enter repo URL');
+    if (!url.includes('github.com')) return toast.error('Only GitHub URLs supported');
+
+    const urlParts = url.replace(/\.git$/, '').split('/');
+    const repoName = urlParts[urlParts.length - 1] || 'Project';
+    const name = projectName.trim() || repoName;
+
+    const normalizedUrl = url.replace(/\.git$/, '').toLowerCase();
+    const isDuplicate = (existingIds || []).some(
+      (existing) => (existing || '').toLowerCase() === normalizedUrl
+    );
+    if (isDuplicate) {
+      return toast.error('This project is already added');
+    }
+
+    onAdd({
+      projectId: `proj-${Date.now()}`,
+      projectName: name,
+      source: method,
+      repoUrl: url,
+      branch: 'main',
+      analysis: { healthScore: null },
+    });
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }}
+        className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <h3><FaFolderOpen /> Add Project</h3>
+        <p className="modal-sub">GitHub repo URL</p>
+
+        <div className="modal-field">
+          <label>Repository URL <span style={{ color: '#ef4444' }}>*</span></label>
+          <input type="text" placeholder="https://github.com/user/repo"
+            value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} autoFocus
+            onKeyDown={(e) => e.key === 'Enter' && handleSubmit()} />
+        </div>
+
+        <div className="modal-field">
+          <label>Project Name (optional)</label>
+          <input type="text" placeholder="My Project (auto-detected)"
+            value={projectName} onChange={(e) => setProjectName(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleSubmit()} />
+          <p style={{ fontSize: '10px', opacity: 0.5, marginTop: '4px' }}>
+            Leave empty to auto-detect from repo name
+          </p>
+        </div>
+
+        <div className="modal-actions">
+          <button onClick={onClose}>Cancel</button>
+          <button className="primary" onClick={handleSubmit}><FaPlus /> Add</button>
+        </div>
+      </motion.div>
+    </div>
+  );
+};
+
+const ConfirmDeleteModal = ({ isOpen, onClose, onConfirm, projectName }) => {
+  if (!isOpen) return null;
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }}
+        className="modal-content" onClick={(e) => e.stopPropagation()}
+        style={{ maxWidth: '380px' }}>
+        <h3><FaTrash /> Delete Project?</h3>
+        <p className="modal-sub">This action cannot be undone</p>
+
+        <div style={{
+          padding: '12px 14px', background: 'rgba(239,68,68,0.08)',
+          border: '1px solid rgba(239,68,68,0.25)', borderRadius: '8px',
+          marginBottom: '16px',
+        }}>
+          <div style={{ fontSize: '12px', opacity: 0.7, marginBottom: '4px' }}>You are about to remove:</div>
+          <div style={{ fontSize: '14px', fontWeight: 600, color: '#ef4444' }}>
+            {projectName}
+          </div>
+        </div>
+
+        <div className="modal-actions">
+          <button onClick={onClose}>Cancel</button>
+          <button className="primary" onClick={onConfirm}
+            style={{ background: 'linear-gradient(135deg, #ef4444, #dc2626)' }}>
+            <FaTrash /> Delete
           </button>
         </div>
       </motion.div>
@@ -473,23 +695,13 @@ const DeployModal = ({ isOpen, onClose, project, onDeploy }) => {
   );
 };
 
-// ============================================
-// MAIN COMPONENT
-// ============================================
 const AssistantChat = () => {
+  // ⭐ REAL USER from AuthContext
+  const { user } = useAuth();
+
   const [messages, setMessages] = useState([{
     id: 'welcome',
-    content: `# 🚀 Welcome to Smart DevOps Assistant
-
-I can help you with:
-- 🚀 **Deploy** your applications
-- ⚙️ **Pipeline** creation and management
-- 🔧 **Fix Code** errors automatically
-- 🔍 **Security** scans
-- 📊 **Monitor** your infrastructure
-- 📈 **Scale** your services
-
-**Add a project and type a command to get started!**`,
+    content: `# 🚀 Smart DevOps Assistant\n\nI can help with:\n- 🚀 **Deploy** (Self-Host)\n- ⚙️ **Pipeline** (CI/CD)\n- 🔧 **Fix Code** (auto-fix + PR)\n- 🔒 **Security** (scan)\n- 📊 **Monitor** (real-time)\n- 📈 **Scale** (replicas)\n\n**Add a project and try a button!**`,
     isUser: false,
     timestamp: new Date().toLocaleTimeString(),
   }]);
@@ -497,83 +709,85 @@ I can help you with:
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [selectedProject, setSelectedProject] = useState(null);
-  const [socket, setSocket] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
-  const [showDeployModal, setShowDeployModal] = useState(false);
-  const [showAddProjectModal, setShowAddProjectModal] = useState(false);
   const [deployments, setDeployments] = useState([]);
 
-  const [projects, setProjects] = useState([
-    { projectId: 'demo-1', projectName: 'Demo Project', source: 'github', repoUrl: 'https://github.com/user/demo', analysis: { healthScore: 85 } },
-    { projectId: 'test-1', projectName: 'Test Upload', source: 'file', analysis: { healthScore: 92 } },
-  ]);
+  const [showDeployModal, setShowDeployModal] = useState(false);
+  const [showPipelineModal, setShowPipelineModal] = useState(false);
+  const [showMonitorModal, setShowMonitorModal] = useState(false);
+  const [showScaleModal, setShowScaleModal] = useState(false);
+  const [showSecurityModal, setShowSecurityModal] = useState(false);
+  const [showFixCodeModal, setShowFixCodeModal] = useState(false);
+  const [showAddProjectModal, setShowAddProjectModal] = useState(false);
+
+  const [deleteTarget, setDeleteTarget] = useState(null);
+
+  const [projects, setProjects] = useState([]);
+  const [projectsLoaded, setProjectsLoaded] = useState(false);
+
+  const [isListening, setIsListening] = useState(false);
+  const recognitionRef = useRef(null);
 
   const [logs, setLogs] = useState([
-    { timestamp: new Date().toISOString(), level: 'info', message: '🤖 Agent Socket Stream Online' },
-    { timestamp: new Date().toISOString(), level: 'info', message: '⏳ Waiting for commands...' },
+    { timestamp: new Date().toISOString(), level: 'info', message: '🤖 Agent Socket Online' },
   ]);
 
   const messagesEndRef = useRef(null);
-  const inputRef = useRef(null);
   const socketRef = useRef(null);
 
   const addLog = useCallback((level, message) => {
     setLogs(prev => [...prev, { timestamp: new Date().toISOString(), level, message }]);
   }, []);
 
+  // Load projects
+  useEffect(() => {
+    const stored = loadProjectsFromStorage();
+    setProjects(stored);
+    setProjectsLoaded(true);
+    if (stored.length > 0) {
+      setSelectedProject(stored[0]);
+    }
+  }, []); // eslint-disable-line
+
+  // Save projects
+  useEffect(() => {
+    if (projectsLoaded) {
+      saveProjectsToStorage(projects);
+    }
+  }, [projects, projectsLoaded]);
+
+  usePlatformEvents('assistant', (evt) => {
+    addLog('info', `📡 ${evt.type} ${evt.data?.name || evt.data?.service_name || ''}`);
+  });
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // ============================================
-  // WebSocket Connection
-  // ============================================
   useEffect(() => {
-    console.log('🔌 Connecting to:', WS_URL);
-
-    const newSocket = io(WS_URL, {
+    const s = io(WS_URL, {
       transports: ['polling', 'websocket'],
       reconnection: true,
       reconnectionAttempts: 10,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
       timeout: 20000,
-      autoConnect: true,
     });
+    socketRef.current = s;
 
-    socketRef.current = newSocket;
-
-    newSocket.on('connect', () => {
-      console.log('✅ Socket connected!', newSocket.id);
+    s.on('connect', () => {
       setIsConnected(true);
       addLog('success', '🔌 WebSocket Connected');
     });
-
-    newSocket.on('disconnect', (reason) => {
-      console.log('❌ Socket disconnected:', reason);
+    s.on('disconnect', (reason) => {
       setIsConnected(false);
       addLog('warning', `🔌 Disconnected: ${reason}`);
     });
-
-    newSocket.on('connect_error', (err) => {
-      console.error('❌ Socket connect error:', err.message);
-      addLog('error', `❌ Connect error: ${err.message}`);
+    s.on('connected', (data) => {
+      addLog('success', `✅ ${data.message || 'Ready'}`);
     });
-
-    newSocket.on('connected', (data) => {
-      console.log('📡 Server says connected:', data);
-      addLog('success', `✅ ${data.message || 'Server ready'}`);
+    s.on('live_log', (data) => {
+      addLog(data.type || data.level || 'info', data.log || data.message || '');
     });
-
-    newSocket.on('live_log', (data) => {
-      const level = data.type || data.level || 'info';
-      const msg = data.log || data.message || '';
-      addLog(level, msg);
-    });
-
-    newSocket.on('chat_response', (data) => {
-      console.log('💬 chat_response:', data);
-
+    s.on('chat_response', (data) => {
       if (data.error) {
         addLog('error', `❌ ${data.error}`);
         setMessages(prev => [...prev, {
@@ -585,65 +799,314 @@ I can help you with:
         setLoading(false);
         return;
       }
-
-      const replyText = typeof data.message === 'string' && data.message.trim()
-        ? data.message
-        : '✅ Task completed!';
-
       setMessages(prev => [...prev, {
         id: Date.now().toString(),
-        content: replyText,
+        content: data.message || '✅ Done',
         isUser: false,
         timestamp: new Date().toLocaleTimeString(),
         execution: data.execution,
       }]);
       setLoading(false);
-      addLog('success', '✅ Response received');
     });
-
-    newSocket.on('action_response', (data) => {
-      console.log('⚡ action_response:', data);
-      if (data.status === 'success') {
-        addLog('success', `✅ ${data.action} done`);
-      } else {
-        addLog('error', `❌ ${data.action} failed`);
-      }
-      setLoading(false);
-    });
-
-    newSocket.on('deploy_complete', (data) => {
-      console.log('🎉 deploy_complete:', data);
+    s.on('deploy_complete', (data) => {
       setDeployments(prev => [...prev, data]);
-
-      // Only add chat message if it's not already added
-      // (the chat_response handler handles the main message)
-      if (data.error) {
-        setMessages(prev => [...prev, {
-          id: Date.now().toString(),
-          content: `## ❌ Deployment Failed\n\n**Error:** ${data.error}`,
-          isUser: false,
-          timestamp: new Date().toLocaleTimeString(),
-        }]);
-      } else {
-        toast.success(`🎉 Live at ${data.liveUrl}`);
-      }
+      if (data.liveUrl) toast.success(`🎉 Live: ${data.liveUrl}`);
       setLoading(false);
     });
 
-    setSocket(newSocket);
-
-    return () => {
-      newSocket.disconnect();
-      socketRef.current = null;
-    };
+    return () => s.disconnect();
   }, [addLog]);
 
-  // ============================================
-  // Send Message
-  // ============================================
-  const handleSend = async (customInput = null) => {
-    console.log('🚀 handleSend called');
+  const handleDeploy = async ({ repoUrl, deployType, autoFix }) => {
+    const project = selectedProject || {
+      projectId: 'default-project', projectName: 'Default Project',
+    };
 
+    setLoading(true);
+    addLog('info', `🚀 Deploy: ${repoUrl}`);
+
+    setMessages(prev => [...prev, {
+      id: Date.now().toString(),
+      content: `🚀 **Deploy started**\n\n- Repo: [${repoUrl}](${repoUrl})\n- Type: \`${deployType}\`\n- Auto-fix: \`${autoFix}\``,
+      isUser: false,
+      timestamp: new Date().toLocaleTimeString(),
+      execution: {
+        status: 'running', progress: 5,
+        steps: [
+          { name: 'Clone repo', status: 'running' },
+          { name: 'Build', status: 'pending' },
+          { name: 'Deploy', status: 'pending' },
+          { name: 'Live', status: 'pending' },
+        ],
+      },
+    }]);
+
+    try {
+      const res = await fetch(`${WS_URL}/api/devops/deploy`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',   // ⭐ IMPORTANT
+        body: JSON.stringify({
+          repo_url: repoUrl,
+          deploy_type: deployType,
+          provider: 'self-host',
+          user_id: user?.id,       // ⭐ REAL USER ID
+          project_id: project.projectId,
+          project_name: project.projectName,
+        }),
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        const url = data.url || data.live_url;
+        addLog('success', `✅ Deployed: ${url}`);
+        setMessages(prev => [...prev, {
+          id: Date.now().toString(),
+          content: `## ✅ Deployed!\n\n**URL:** [${url}](${url})`,
+          isUser: false,
+          timestamp: new Date().toLocaleTimeString(),
+          execution: { status: 'completed', progress: 100, liveUrl: url },
+        }]);
+      } else {
+        toast.error(data.error || 'Deploy failed');
+      }
+    } catch (e) {
+      toast.error('Deploy error');
+    }
+
+    setLoading(false);
+  };
+
+  const handlePipeline = async ({ repoUrl, maxAttempts, autoDeploy }) => {
+    setLoading(true);
+    addLog('info', `⚙️ Pipeline: ${repoUrl}`);
+
+    setMessages(prev => [...prev, {
+      id: Date.now().toString(),
+      content: `⚙️ **Pipeline creating**\n\n- Repo: [${repoUrl}](${repoUrl})\n- Auto-deploy: \`${autoDeploy}\``,
+      isUser: false,
+      timestamp: new Date().toLocaleTimeString(),
+      execution: {
+        status: 'running', progress: 10,
+        steps: [
+          { name: 'Parse repo', status: 'running' },
+          { name: 'Generate YAML', status: 'pending' },
+          { name: 'Commit', status: 'pending' },
+          { name: 'Monitor', status: 'pending' },
+        ],
+      },
+    }]);
+
+    try {
+      const res = await fetch(`${WS_URL}/api/devops/pipeline`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',   // ⭐ IMPORTANT
+        body: JSON.stringify({
+          repo_url: repoUrl,
+          mode: autoDeploy ? 'ci-cd+deploy' : 'ci-cd-only',
+          max_fix_attempts: maxAttempts,
+          user_id: user?.id,       // ⭐ REAL USER ID
+        }),
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        addLog('success', '✅ Pipeline created');
+        setMessages(prev => [...prev, {
+          id: Date.now().toString(),
+          content: `## ✅ Pipeline created!\n\n${data.response || 'Check Pipelines page'}`,
+          isUser: false,
+          timestamp: new Date().toLocaleTimeString(),
+          execution: { status: 'completed', progress: 100 },
+        }]);
+      } else {
+        toast.error(data.error || 'Pipeline failed');
+      }
+    } catch (e) {
+      toast.error('Pipeline error');
+    }
+
+    setLoading(false);
+  };
+
+  const handleMonitor = async ({ repoUrl, url }) => {
+    setLoading(true);
+    addLog('info', `📊 Monitoring: ${repoUrl}`);
+
+    setMessages(prev => [...prev, {
+      id: Date.now().toString(),
+      content: `📊 **Monitoring started**\n\n- Repo: [${repoUrl}](${repoUrl})\n${url ? `- URL: ${url}` : ''}`,
+      isUser: false,
+      timestamp: new Date().toLocaleTimeString(),
+      execution: {
+        status: 'running', progress: 30,
+        steps: [
+          { name: 'HTTP check', status: 'running' },
+          { name: 'Save result', status: 'pending' },
+        ],
+      },
+    }]);
+
+    const result = await actionAPI.monitor({
+      repo_url: repoUrl,
+      url: url || null,
+      user_id: user?.id,         // ⭐ REAL USER ID
+    });
+
+    if (result.success) {
+      addLog('success', '✅ Monitor started');
+      setMessages(prev => [...prev, {
+        id: Date.now().toString(),
+        content: result.response || `## ✅ Monitoring\n\n${result.action?.result?.url || url || 'Check Monitoring page'}`,
+        isUser: false,
+        timestamp: new Date().toLocaleTimeString(),
+        execution: { status: 'completed', progress: 100 },
+      }]);
+    } else {
+      toast.error(result.error || 'Monitor failed');
+    }
+
+    setLoading(false);
+  };
+
+  const handleScale = async ({ repoUrl, service, replicas }) => {
+    setLoading(true);
+    addLog('info', `📈 Scaling ${service || 'app'} → ${replicas}`);
+
+    setMessages(prev => [...prev, {
+      id: Date.now().toString(),
+      content: `📈 **Scaling**\n\n- Repo: [${repoUrl}](${repoUrl})\n- Service: \`${service || 'auto'}\`\n- Target: \`${replicas} replicas\``,
+      isUser: false,
+      timestamp: new Date().toLocaleTimeString(),
+      execution: {
+        status: 'running', progress: 20,
+        steps: [
+          { name: 'Detect state', status: 'running' },
+          { name: 'Apply scaling', status: 'pending' },
+          { name: 'Verify', status: 'pending' },
+        ],
+      },
+    }]);
+
+    const result = await actionAPI.scale({
+      repo_url: repoUrl,
+      service,
+      replicas,
+      user_id: user?.id,         // ⭐ REAL USER ID
+    });
+
+    if (result.success) {
+      const res = result.action?.result || result.result || {};
+      const oldR = res.old_replicas ?? res.old ?? 1;
+      const newR = res.new_replicas ?? res.new ?? res.replicas ?? replicas;
+      addLog('success', `✅ Scaled: ${oldR} → ${newR}`);
+      setMessages(prev => [...prev, {
+        id: Date.now().toString(),
+        content: result.response || `## ✅ Scaled!\n\n- Service: ${res.service || service}\n- ${oldR} → **${newR}** replicas`,
+        isUser: false,
+        timestamp: new Date().toLocaleTimeString(),
+        execution: { status: 'completed', progress: 100 },
+      }]);
+    } else {
+      toast.error(result.error || 'Scale failed');
+    }
+
+    setLoading(false);
+  };
+
+  const handleSecurity = async ({ repoUrl }) => {
+    setLoading(true);
+    addLog('info', `🔒 Security: ${repoUrl}`);
+
+    setMessages(prev => [...prev, {
+      id: Date.now().toString(),
+      content: `🔒 **Scanning**\n\n- Repo: [${repoUrl}](${repoUrl})`,
+      isUser: false,
+      timestamp: new Date().toLocaleTimeString(),
+      execution: {
+        status: 'running', progress: 30,
+        steps: [
+          { name: 'Clone', status: 'running' },
+          { name: 'Scan files', status: 'pending' },
+          { name: 'Analyze', status: 'pending' },
+        ],
+      },
+    }]);
+
+    const result = await actionAPI.security({
+      repo_url: repoUrl,
+      user_id: user?.id,         // ⭐ REAL USER ID
+    });
+
+    if (result.success) {
+      const res = result.result || result.action?.result || {};
+      addLog('success', `✅ Scan done: ${res.critical || 0}C ${res.high || 0}H`);
+      setMessages(prev => [...prev, {
+        id: Date.now().toString(),
+        content: result.response || `## 🔒 Security Report\n\n- Critical: **${res.critical || 0}**\n- High: **${res.high || 0}**\n- Medium: **${res.medium || 0}**\n- Low: **${res.low || 0}**`,
+        isUser: false,
+        timestamp: new Date().toLocaleTimeString(),
+        execution: { status: 'completed', progress: 100 },
+      }]);
+    } else {
+      toast.error(result.error || 'Scan failed');
+    }
+
+    setLoading(false);
+  };
+
+  const handleFixCode = async ({ repoUrl }) => {
+    setLoading(true);
+    addLog('info', `🔧 Fix Code: ${repoUrl}`);
+
+    setMessages(prev => [...prev, {
+      id: Date.now().toString(),
+      content: `🔧 **Scanning & Fixing**\n\n- Repo: [${repoUrl}](${repoUrl})\n\n⚠️ This creates a PR`,
+      isUser: false,
+      timestamp: new Date().toLocaleTimeString(),
+      execution: {
+        status: 'running', progress: 15,
+        steps: [
+          { name: 'Clone', status: 'running' },
+          { name: 'Scan', status: 'pending' },
+          { name: 'Fix', status: 'pending' },
+          { name: 'Commit + PR', status: 'pending' },
+        ],
+      },
+    }]);
+
+    const result = await actionAPI.fixCode({
+      repo_url: repoUrl,
+      user_id: user?.id,         // ⭐ REAL USER ID
+    });
+
+    if (result.success) {
+      const res = result.result || {};
+      addLog('success', `✅ Fixed: ${res.message || 'done'}`);
+
+      let content = `## ✅ Code Fixed!\n\n`;
+      if (res.pr_url) content += `**PR:** [${res.pr_url}](${res.pr_url})\n\n`;
+      if (res.branch) content += `**Branch:** \`${res.branch}\`\n\n`;
+      if (res.files_fixed?.length) {
+        content += `**Files fixed:**\n${res.files_fixed.map(f => `- \`${f.file}\` (${f.issues})`).join('\n')}`;
+      }
+
+      setMessages(prev => [...prev, {
+        id: Date.now().toString(),
+        content: result.response || content,
+        isUser: false,
+        timestamp: new Date().toLocaleTimeString(),
+        execution: { status: 'completed', progress: 100, liveUrl: res.pr_url },
+      }]);
+    } else {
+      toast.error(result.error || 'Fix failed');
+    }
+
+    setLoading(false);
+  };
+
+  const handleSend = async (customInput = null) => {
     const text = (customInput || input).trim();
     if (!text || loading) return;
 
@@ -655,152 +1118,137 @@ I can help you with:
     }]);
     setInput('');
     setLoading(true);
-    addLog('info', `💬 User: ${text.substring(0, 60)}`);
+    addLog('info', `💬 ${text.substring(0, 60)}`);
 
-    let project = selectedProject;
-    if (!project) {
-      project = {
-        projectId: 'default-project',
-        projectName: 'Default Project',
-        source: 'default',
-      };
-      addLog('warning', '⚠️ No project selected — using default');
-    }
+    const project = selectedProject || {
+      projectId: 'default-project', projectName: 'Default Project', source: 'default',
+    };
 
     if (socketRef.current && isConnected) {
       socketRef.current.emit('chat', {
         message: text,
-        user_id: 'demo_user',
+        user_id: user?.id,       // ⭐ REAL USER ID
         project_id: project.projectId,
         project_name: project.projectName,
         source: project.source,
       });
 
-      // Longer timeout for real deployments (Vercel can take 2-3 min)
-      setTimeout(() => {
-        setLoading(prevLoading => {
-          if (prevLoading) {
-            console.log('⏱️ Loading timeout — resetting');
-            return false;
-          }
-          return prevLoading;
-        });
-      }, 180000); // 3 minutes
+      setTimeout(() => setLoading(false), 180000);
     } else {
       setTimeout(() => {
         setMessages(prev => [...prev, {
           id: Date.now().toString(),
-          content: `✅ **Task received!**\n\n\`${text}\`\n\n*Socket not connected — mock response*`,
+          content: `✅ Received: \`${text}\``,
           isUser: false,
           timestamp: new Date().toLocaleTimeString(),
-          execution: {
-            status: 'completed',
-            progress: 100,
-            duration: '0.8s',
-            steps: [
-              { name: 'Analyze', status: 'completed', duration: '0.3s' },
-              { name: 'Execute', status: 'completed', duration: '0.5s' },
-            ],
-          },
         }]);
         setLoading(false);
-      }, 1000);
+      }, 800);
     }
   };
 
-  // ============================================
-  // Quick Actions
-  // ============================================
   const handleQuickAction = (action) => {
-    console.log('⚡ Quick action:', action);
-
-    let project = selectedProject;
-    if (!project) {
-      project = { projectId: 'default-project', projectName: 'Default Project', source: 'default' };
-    }
-
-    if (socketRef.current && isConnected) {
-      setLoading(true);
-      addLog('info', `🚀 ${action.toUpperCase()} → ${project.projectName}`);
-      socketRef.current.emit('devops_action', {
-        action,
-        project_id: project.projectId,
-        project_name: project.projectName,
-        user_id: 'demo_user',
-      });
-      setTimeout(() => setLoading(false), 60000);
-    } else {
-      handleSend(action);
-    }
+    if (action === 'deploy') return setShowDeployModal(true);
+    if (action === 'pipeline') return setShowPipelineModal(true);
+    if (action === 'monitor') return setShowMonitorModal(true);
+    if (action === 'scale') return setShowScaleModal(true);
+    if (action === 'security') return setShowSecurityModal(true);
+    if (action === 'fix_code') return setShowFixCodeModal(true);
   };
 
-  // ============================================
-  // Deploy Handler
-  // ============================================
-  const handleDeploy = ({ deployType, provider, autoFix, repoUrl }) => {
-    console.log('🚀 handleDeploy:', { deployType, provider, autoFix, repoUrl });
+  const handleAddProject = (project) => {
+    setProjects(prev => [...prev, project]);
+    setSelectedProject(project);
+    addLog('success', `📁 Added: ${project.projectName}`);
+    toast.success(`✅ ${project.projectName} added`);
+    setShowAddProjectModal(false);
+  };
 
-    let project = selectedProject;
-    if (!project) {
-      project = { projectId: 'default-project', projectName: 'Default Project', source: 'default' };
+  const handleDeleteProject = (project) => {
+    setDeleteTarget(project);
+  };
+
+  const confirmDeleteProject = () => {
+    if (!deleteTarget) return;
+    const id = deleteTarget.projectId;
+
+    setProjects(prev => prev.filter(p => p.projectId !== id));
+
+    if (selectedProject?.projectId === id) {
+      setSelectedProject(null);
     }
 
-    // ⭐ Use the repoUrl from the modal (this is what gets passed)
-    const finalRepoUrl = repoUrl || project.repoUrl || null;
+    addLog('warning', `🗑️ Removed: ${deleteTarget.projectName}`);
+    toast.success(`Removed ${deleteTarget.projectName}`);
+    setDeleteTarget(null);
+  };
 
-    if (!finalRepoUrl) {
-      toast.error('Please provide a GitHub repo URL');
+  const startVoiceRecognition = useCallback(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      toast.error('Voice not supported. Use Chrome or Edge.');
       return;
     }
 
-    const payload = {
-      projectId: project.projectId,
-      projectName: project.projectName,
-      deployType,
-      provider,
-      autoFix,
-      repoUrl: finalRepoUrl,
-      source: project.source || 'github',
-      user_id: 'demo_user',
-    };
+    try {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = false;
+      recognition.interimResults = true;
+      recognition.lang = 'en-US';
+      recognition.maxAlternatives = 1;
 
-    addLog('info', `🚀 Deploy: ${deployType} (${provider}) → ${finalRepoUrl}`);
+      recognition.onstart = () => {
+        setIsListening(true);
+        addLog('info', '🎤 Voice listening...');
+        toast.success('🎤 Listening...');
+      };
 
-    if (socketRef.current && isConnected) {
-      socketRef.current.emit('deploy_start', payload);
-      setMessages(prev => [...prev, {
-        id: Date.now().toString(),
-        content: `⏳ **Deployment started**\n\n- Type: \`${deployType}\`\n- Builder: \`${provider}\`\n- Repo: [${finalRepoUrl}](${finalRepoUrl})\n\nWatch the **Live Terminal** →`,
-        isUser: false,
-        timestamp: new Date().toLocaleTimeString(),
-        execution: {
-          status: 'running',
-          progress: 5,
-          steps: [
-            { name: '📦 Clone repo', status: 'running' },
-            { name: '🔍 Detect stack', status: 'pending' },
-            { name: '⚙️ Create Vercel project', status: 'pending' },
-            { name: '🚀 Deploy', status: 'pending' },
-            { name: '✅ Health check', status: 'pending' },
-          ],
-        },
-      }]);
+      recognition.onresult = (event) => {
+        let interim = '';
+        let final = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const transcript = event.results[i][0].transcript;
+          if (event.results[i].isFinal) final += transcript;
+          else interim += transcript;
+        }
+        if (final) setInput((prev) => (prev + ' ' + final).trim());
+        else if (interim) setInput((prev) => (prev + ' ' + interim).trim());
+      };
 
-      // Long timeout for real deployments
-      setTimeout(() => {
-        setLoading(prevLoading => {
-          if (prevLoading) return false;
-          return prevLoading;
-        });
-      }, 180000);
-    } else {
-      toast.error('Socket not connected');
+      recognition.onerror = (event) => {
+        setIsListening(false);
+        addLog('error', `🎤 Voice error: ${event.error}`);
+        if (event.error === 'not-allowed') toast.error('Microphone permission denied');
+        else if (event.error !== 'aborted') toast.error(`Voice error: ${event.error}`);
+      };
+
+      recognition.onend = () => {
+        setIsListening(false);
+        recognitionRef.current = null;
+      };
+
+      recognitionRef.current = recognition;
+      recognition.start();
+    } catch (e) {
+      setIsListening(false);
+      addLog('error', `🎤 Voice init failed: ${String(e).slice(0, 100)}`);
+      toast.error('Voice init failed');
     }
-  };
+  }, [addLog]);
 
-  // ============================================
-  // Helpers
-  // ============================================
+  const stopVoiceRecognition = useCallback(() => {
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch (e) {}
+      recognitionRef.current = null;
+    }
+    setIsListening(false);
+  }, []);
+
+  const toggleVoice = useCallback(() => {
+    if (isListening) stopVoiceRecognition();
+    else startVoiceRecognition();
+  }, [isListening, startVoiceRecognition, stopVoiceRecognition]);
+
   const quickActions = [
     { icon: BsLightningCharge, label: 'Deploy', action: 'deploy', color: 'blue' },
     { icon: FiZap, label: 'Pipeline', action: 'pipeline', color: 'purple' },
@@ -812,10 +1260,9 @@ I can help you with:
 
   const suggestions = [
     'Deploy https://github.com/Aruniisu/Tomo-coffee',
-    'Fix this code: ```python def add(a, b) return a + b```',
     'Create CI/CD pipeline',
     'Run security scan',
-    'Scale to 5 replicas',
+    'Monitor my app',
   ];
 
   const handleKeyPress = (e) => {
@@ -825,18 +1272,55 @@ I can help you with:
     }
   };
 
-  const clearLogs = () => { setLogs([]); addLog('info', '🗑️ Logs cleared'); };
+  const clearLogs = () => { setLogs([]); addLog('info', '🗑️ Cleared'); };
+
   const exportLogs = () => {
-    const text = logs.map(l => `[${new Date(l.timestamp).toLocaleTimeString()}] ${l.message}`).join('\n');
-    downloadFile(text, `logs_${Date.now()}.txt`);
+    if (!logs || logs.length === 0) {
+      toast.error('No logs to download');
+      return;
+    }
+
+    const now = new Date();
+    const successCount = logs.filter(l => l.level === 'success').length;
+    const errorCount = logs.filter(l => l.level === 'error').length;
+    const warningCount = logs.filter(l => l.level === 'warning').length;
+    const infoCount = logs.filter(l => l.level === 'info').length;
+
+    const header = [
+      '═══════════════════════════════════════════════════════════',
+      '  Smart DevOps — Live Logs Export',
+      '═══════════════════════════════════════════════════════════',
+      `  Generated: ${now.toLocaleString()}`,
+      `  User: ${user?.email || 'unknown'}`,
+      `  Total: ${logs.length} logs`,
+      `  ✅ Success: ${successCount}`,
+      `  ⚠️  Warning: ${warningCount}`,
+      `  ❌ Error: ${errorCount}`,
+      `  ℹ️  Info: ${infoCount}`,
+      '═══════════════════════════════════════════════════════════',
+      '',
+      '',
+    ].join('\n');
+
+    const body = logs.map((l) => {
+      const ts = new Date(l.timestamp);
+      const level = (l.level || 'info').toUpperCase().padEnd(7);
+      return `[${ts.toLocaleDateString()} ${ts.toLocaleTimeString()}] [${level}] ${(l.message || '').replace(/\n/g, ' ')}`;
+    }).join('\n');
+
+    const footer = '\n\n═══════════════════════════════════════════════════════════\n';
+
+    const filename = `smartdevops-logs-${now.toISOString().replace(/[:.]/g, '-').slice(0, 19)}.txt`;
+    downloadFile(header + body + footer, filename, 'text/plain');
+
+    toast.success(`Downloaded ${logs.length} logs`);
+    addLog('success', `📥 Exported ${logs.length} logs`);
   };
 
-  // ============================================
-  // RENDER
-  // ============================================
+  const existingRepoUrls = projects.map(p => (p.repoUrl || '').toLowerCase());
+
   return (
     <div className="chat-main">
-      {/* SIDEBAR */}
       <div className="sidebar">
         <div className="sidebar-logo">
           <div className="logo-icon"><FaRobot /></div>
@@ -853,21 +1337,16 @@ I can help you with:
               <div className="active-project-name">
                 <FaFolderOpen /> {selectedProject.projectName}
               </div>
-              <div className="active-project-meta">
-                <span className="health">{selectedProject.analysis?.healthScore || '—'}%</span>
-                <span className="source">{selectedProject.source}</span>
-              </div>
             </div>
           ) : (
             <div className="no-project">
               <p>No project selected</p>
-              <p className="no-project-sub">Pick one below or use default</p>
             </div>
           )}
         </div>
 
         <div className="sidebar-section">
-          <div className="section-title">System Health</div>
+          <div className="section-title">System</div>
           <div className="health-item">
             <span className={`dot ${isConnected ? 'online' : 'offline'}`}></span>
             <span>{isConnected ? 'Connected' : 'Disconnected'}</span>
@@ -879,60 +1358,81 @@ I can help you with:
             <span>Projects ({projects.length})</span>
             <button
               onClick={() => setShowAddProjectModal(true)}
+              title="Add project"
               style={{
                 background: 'linear-gradient(135deg, #a855f7, #6366f1)',
                 border: 'none', color: '#fff',
-                width: '18px', height: '18px',
+                width: '20px', height: '20px',
                 borderRadius: '4px', cursor: 'pointer',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-              }}
-              title="Add Project"
-            >
+                fontSize: '10px',
+              }}>
               <FaPlus />
             </button>
           </div>
 
-          {projects.map((p) => (
-            <div
-              key={p.projectId}
-              className={`project-item ${selectedProject?.projectId === p.projectId ? 'active' : ''}`}
-              onClick={() => setSelectedProject(p)}
-            >
-              <div className="project-name">
-                <FaFolderOpen /> {p.projectName}
-              </div>
-              <div className="project-meta">
-                <span>{p.source}</span>
-                <span className="health">Health: {p.analysis?.healthScore ? `${p.analysis.healthScore}%` : '—'}</span>
-              </div>
+          {projects.length === 0 ? (
+            <div className="no-project" style={{ padding: '12px 0', textAlign: 'center' }}>
+              <p style={{ fontSize: '11px', opacity: 0.5 }}>
+                No projects yet.<br />Click <FaPlus size={9} /> to add one.
+              </p>
             </div>
-          ))}
-        </div>
+          ) : (
+            projects.map((p) => (
+              <div
+                key={p.projectId}
+                className={`project-item ${selectedProject?.projectId === p.projectId ? 'active' : ''}`}
+                style={{ position: 'relative' }}
+              >
+                <div
+                  onClick={() => setSelectedProject(p)}
+                  style={{ cursor: 'pointer', flex: 1, minWidth: 0 }}
+                >
+                  <div className="project-name"><FaFolderOpen /> {p.projectName}</div>
+                  <div className="project-meta">
+                    <span>{p.source || 'github'}</span>
+                  </div>
+                </div>
 
-        {deployments.length > 0 && (
-          <div className="sidebar-section">
-            <div className="section-title">Live Deployments</div>
-            {deployments.slice(-3).map((d, i) => (
-              <a key={i} href={d.liveUrl} target="_blank" rel="noopener noreferrer" className="deploy-link">
-                <FaRocket /> {d.type || 'app'}
-              </a>
-            ))}
-          </div>
-        )}
+                <button
+                  onClick={(e) => { e.stopPropagation(); handleDeleteProject(p); }}
+                  title="Delete project"
+                  className="project-delete-btn"
+                  style={{
+                    position: 'absolute', right: '6px', top: '50%',
+                    transform: 'translateY(-50%)',
+                    background: 'rgba(239,68,68,0.1)',
+                    border: '1px solid rgba(239,68,68,0.3)',
+                    color: '#ef4444',
+                    width: '22px', height: '22px',
+                    borderRadius: '4px', cursor: 'pointer',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: '10px',
+                    opacity: 0.7,
+                    transition: 'opacity 0.15s',
+                  }}
+                  onMouseEnter={(e) => e.currentTarget.style.opacity = '1'}
+                  onMouseLeave={(e) => e.currentTarget.style.opacity = '0.7'}
+                >
+                  <FaTrash />
+                </button>
+              </div>
+            ))
+          )}
+        </div>
 
         <div className="sidebar-footer">
           <div className="user-info">
-            <div className="avatar">D</div>
+            <div className="avatar">{user?.name?.[0]?.toUpperCase() || 'D'}</div>
             <div>
-              <div className="name">Demo User</div>
-              <div className="role">Engineer</div>
+              <div className="name">{user?.name || 'Demo User'}</div>
+              <div className="role">{user?.role || 'Engineer'}</div>
             </div>
           </div>
-          <div className="version">v3.0.0 • {isConnected ? 'Online' : 'Idle'}</div>
+          <div className="version">{APP_VERSION}</div>
         </div>
       </div>
 
-      {/* CENTER CHAT */}
       <div className="chat-center">
         <div className="chat-header">
           <div className="header-left">
@@ -942,12 +1442,8 @@ I can help you with:
             </span>
           </div>
           <div className="header-right">
-            <button onClick={() => setShowAddProjectModal(true)}>
-              <FaPlus /> Add
-            </button>
-            <button onClick={() => setMessages([messages[0]])}>
-              <FaTrash /> Clear
-            </button>
+            <button onClick={() => setShowAddProjectModal(true)}><FaPlus /> Add</button>
+            <button onClick={() => setMessages([messages[0]])}><FaTrash /> Clear</button>
             <button className="primary" onClick={() => setShowDeployModal(true)}>
               <FaRocket /> Deploy
             </button>
@@ -964,14 +1460,8 @@ I can help you with:
 
         <div className="messages">
           {messages.map((msg) => (
-            <Message
-              key={msg.id}
-              message={msg.content}
-              content={msg.content}
-              isUser={msg.isUser}
-              timestamp={msg.timestamp}
-              execution={msg.execution}
-            />
+            <Message key={msg.id} message={msg.content} content={msg.content}
+              isUser={msg.isUser} timestamp={msg.timestamp} execution={msg.execution} />
           ))}
           {loading && (
             <div className="message assistant">
@@ -980,7 +1470,7 @@ I can help you with:
                 <div className="bubble">
                   <div className="thinking">
                     <span className="dots"><span /><span /><span /></span>
-                    <span>Processing... (this may take 1-2 minutes for real deploys)</span>
+                    <span>Processing...</span>
                   </div>
                 </div>
               </div>
@@ -992,25 +1482,30 @@ I can help you with:
         <div className="suggestions">
           <span>💡 Try:</span>
           {suggestions.map((s, i) => (
-            <button key={i} onClick={() => handleSend(s)}>{s.length > 40 ? s.substring(0, 40) + '...' : s}</button>
+            <button key={i} onClick={() => handleSend(s)}>
+              {s.length > 40 ? s.substring(0, 40) + '...' : s}
+            </button>
           ))}
         </div>
 
         <div className="input-area">
           <div className="input-wrapper">
-            <textarea
-              ref={inputRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
+            <textarea value={input} onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyPress}
-              placeholder="Ask me to deploy, fix code, create pipelines..."
+              placeholder="Ask me to deploy, fix code, create pipelines... (or click mic for voice)"
               rows={1}
               onInput={(e) => {
                 e.target.style.height = 'auto';
                 e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px';
-              }}
-            />
-            <button className="mic"><FaMicrophone /></button>
+              }} />
+            <button
+              className={`mic ${isListening ? 'listening' : ''}`}
+              onClick={toggleVoice}
+              title={isListening ? 'Stop listening' : 'Voice input'}
+              type="button"
+            >
+              {isListening ? <FaStop /> : <FaMicrophone />}
+            </button>
           </div>
           <button className="send" onClick={() => handleSend()} disabled={!input.trim() || loading}>
             {loading ? <FaSpinner className="spin" /> : <FaPaperPlane />}
@@ -1020,23 +1515,36 @@ I can help you with:
 
       <LiveTerminal logs={logs} onClear={clearLogs} onExport={exportLogs} />
 
+      <DeployModal isOpen={showDeployModal} onClose={() => setShowDeployModal(false)}
+        onRun={(d) => { handleDeploy(d); setShowDeployModal(false); }} project={selectedProject} />
+
+      <PipelineModal isOpen={showPipelineModal} onClose={() => setShowPipelineModal(false)}
+        onRun={(d) => { handlePipeline(d); setShowPipelineModal(false); }} project={selectedProject} />
+
+      <MonitorModal isOpen={showMonitorModal} onClose={() => setShowMonitorModal(false)}
+        onRun={(d) => { handleMonitor(d); setShowMonitorModal(false); }} project={selectedProject} />
+
+      <ScaleModal isOpen={showScaleModal} onClose={() => setShowScaleModal(false)}
+        onRun={(d) => { handleScale(d); setShowScaleModal(false); }} project={selectedProject} />
+
+      <SecurityModal isOpen={showSecurityModal} onClose={() => setShowSecurityModal(false)}
+        onRun={(d) => { handleSecurity(d); setShowSecurityModal(false); }} project={selectedProject} />
+
+      <FixCodeModal isOpen={showFixCodeModal} onClose={() => setShowFixCodeModal(false)}
+        onRun={(d) => { handleFixCode(d); setShowFixCodeModal(false); }} project={selectedProject} />
+
       <AddProjectModal
         isOpen={showAddProjectModal}
         onClose={() => setShowAddProjectModal(false)}
-        onAdd={(newProject) => {
-          setProjects(prev => [...prev, newProject]);
-          setSelectedProject(newProject);
-          addLog('success', `📁 Added: ${newProject.projectName}`);
-          toast.success(`✅ ${newProject.projectName} added`);
-          setShowAddProjectModal(false);
-        }}
+        onAdd={handleAddProject}
+        existingIds={existingRepoUrls}
       />
 
-      <DeployModal
-        isOpen={showDeployModal}
-        onClose={() => setShowDeployModal(false)}
-        project={selectedProject}
-        onDeploy={handleDeploy}
+      <ConfirmDeleteModal
+        isOpen={!!deleteTarget}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={confirmDeleteProject}
+        projectName={deleteTarget?.projectName || ''}
       />
     </div>
   );

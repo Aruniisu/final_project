@@ -1,0 +1,251 @@
+"""
+PipelineAgent — Full Agentic CI/CD
+LLM reasoning + YAML generation + GitHub integration + Auto-fix
+"""
+
+import os
+import time
+import json
+from typing import Dict, Any, Optional
+from datetime import datetime
+
+from ..base_agent import BaseAgent
+
+
+class PipelineAgent(BaseAgent):
+    """Agentic CI/CD pipeline agent."""
+
+    def __init__(self, config: Optional[Dict] = None):
+        super().__init__(
+            'PipelineAgent',
+            config={
+                **(config or {}),
+                'role': 'CI/CD pipeline specialist',
+                'goal': 'Generate, deploy, and manage CI/CD pipelines',
+                'capabilities': [
+                    'detect_stack',
+                    'generate_yaml',
+                    'commit_yaml',
+                    'monitor_pipeline',
+                ],
+            }
+        )
+        self.total_pipelines = 0
+        self.successful_pipelines = 0
+
+    def process(self, input_data: Any, context: Optional[Dict] = None) -> Dict:
+        sid = context.get('sid') if context else None
+        repo_url = input_data.get('repo_url') if isinstance(input_data, dict) else None
+        action = input_data.get('action', 'create') if isinstance(input_data, dict) else 'create'
+
+        self.emit_log("=" * 50, "info", sid)
+        self.emit_log("🔄 PipelineAgent started", "info", sid)
+        self.emit_log(f"📦 Repo: {repo_url}", "info", sid)
+        self.emit_log(f"🎯 Action: {action}", "info", sid)
+
+        if not repo_url:
+            return {'success': False, 'error': 'No repo_url provided'}
+
+        start_time = time.time()
+
+        try:
+            # STEP 1: Parse URL
+            self.emit_log("", "info", sid)
+            self.emit_log("📍 STEP 1: Parsing GitHub URL", "info", sid)
+
+            parsed = self.use_tool('github_parse_url', url=repo_url)
+            if not parsed.get('success'):
+                return {'success': False, 'error': 'Invalid GitHub URL'}
+
+            owner = parsed['owner']
+            repo = parsed['repo']
+            self.emit_log(f"✅ Owner: {owner}, Repo: {repo}", "success", sid)
+            self.remember('owner', owner)
+            self.remember('repo', repo)
+
+            # STEP 2: Get repo info
+            self.emit_log("", "info", sid)
+            self.emit_log("📍 STEP 2: Fetching repo info", "info", sid)
+
+            repo_info = self.use_tool('github_get_repo_info', owner=owner, repo=repo)
+            if not repo_info.get('success'):
+                return {'success': False, 'error': 'Repo not found'}
+
+            default_branch = repo_info.get('default_branch', 'main')
+            self.remember('branch', default_branch)
+
+            # STEP 3: Clone + detect stack
+            self.emit_log("", "info", sid)
+            self.emit_log("📍 STEP 3: Detecting stack", "info", sid)
+
+            clone_result = self.use_tool('github_clone', owner=owner, repo=repo, branch=default_branch)
+            if not clone_result.get('success'):
+                return {'success': False, 'error': 'Clone failed'}
+
+            stack = self.use_tool('detect_stack', repo_path=clone_result.get('path'))
+            stack_type = stack.get('type', 'unknown')
+            framework = stack.get('framework', 'unknown')
+
+            self.emit_log(f"✅ Stack: {stack_type} ({framework})", "success", sid)
+            self.remember('stack_type', stack_type)
+            self.remember('framework', framework)
+
+            # STEP 4: LLM generate YAML
+            self.emit_log("", "info", sid)
+            self.emit_log("📍 STEP 4: Generating CI/CD YAML", "info", sid)
+
+            yaml_content = self._generate_yaml(stack_type, framework, sid)
+
+            if not yaml_content:
+                return {'success': False, 'error': 'YAML generation failed'}
+
+            self.emit_log(f"✅ YAML generated ({len(yaml_content)} chars)", "success", sid)
+
+            # STEP 5: Commit YAML to repo
+            self.emit_log("", "info", sid)
+            self.emit_log("📍 STEP 5: Committing workflow file", "info", sid)
+
+            commit_result = self.use_tool(
+                'github_commit_file',
+                owner=owner,
+                repo=repo,
+                path='.github/workflows/ci.yml',
+                content=yaml_content,
+                message='Add CI/CD pipeline (auto-generated)',
+                branch=default_branch,
+            )
+
+            if not commit_result.get('success'):
+                return {'success': False, 'error': f"Commit failed: {commit_result.get('error')}"}
+
+            commit_sha = commit_result.get('commit_sha', 'N/A')[:8]
+            self.emit_log(f"✅ Committed: {commit_sha}", "success", sid)
+
+            # Done
+            elapsed = time.time() - start_time
+            self.total_pipelines += 1
+            self.successful_pipelines += 1
+            self.track_metric(True, elapsed)
+
+            actions_url = f'https://github.com/{owner}/{repo}/actions'
+
+            self.emit_log("", "info", sid)
+            self.emit_log("=" * 50, "success", sid)
+            self.emit_log(f"🎉 PIPELINE CREATED in {elapsed:.1f}s", "success", sid)
+            self.emit_log(f"🔗 Actions: {actions_url}", "success", sid)
+            self.emit_log("=" * 50, "success", sid)
+
+            return {
+                'success': True,
+                'type': 'pipeline',
+                'status': 'created',
+                'repo': f'{owner}/{repo}',
+                'workflow_file': '.github/workflows/ci.yml',
+                'commit_sha': commit_sha,
+                'actions_url': actions_url,
+                'duration': f'{elapsed:.1f}s',
+                'response': f"## 🎉 CI/CD Pipeline Created!\n\n**Repo:** [{owner}/{repo}]({repo_url})\n**Workflow:** `.github/workflows/ci.yml`\n**Commit:** `{commit_sha}`\n**Actions:** [{actions_url}]({actions_url})\n\n*Pipeline will run automatically on next push.*",
+            }
+
+        except Exception as e:
+            elapsed = time.time() - start_time
+            self.track_metric(False, elapsed)
+            self.emit_log(f"❌ Fatal error: {str(e)[:200]}", "error", sid)
+            import traceback
+            traceback.print_exc()
+            return {'success': False, 'error': str(e)}
+
+    def _generate_yaml(self, stack_type: str, framework: str, sid: Optional[str] = None) -> Optional[str]:
+        """Use LLM to generate CI/CD YAML."""
+
+        # Try LLM first
+        prompt = f"""Generate a complete GitHub Actions CI/CD workflow YAML for:
+
+- Stack: {stack_type}
+- Framework: {framework}
+
+Requirements:
+1. Trigger on push to main and pull requests
+2. Install dependencies
+3. Run linting
+4. Run tests
+5. Build the project
+6. Cache dependencies for speed
+7. Use Node.js 20 for node stacks, Python 3.11 for python
+
+Respond ONLY with the raw YAML content (no markdown fences, no explanation).
+Start directly with "name: CI/CD Pipeline"."""
+
+        llm_yaml = self.call_llm(prompt)
+
+        if llm_yaml:
+            # Clean up any markdown fences
+            llm_yaml = llm_yaml.replace('```yaml', '').replace('```yml', '').replace('```', '').strip()
+            if llm_yaml.startswith('name:'):
+                self.emit_log("✅ LLM generated YAML", "success", sid)
+                return llm_yaml
+
+        # Fallback: template-based
+        self.emit_log("⚠️ Using template-based YAML", "warning", sid)
+        return self._get_yaml_template(stack_type)
+
+    def _get_yaml_template(self, stack_type: str) -> str:
+        """Fallback YAML template."""
+        if stack_type in ('node',):
+            return """name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run build --if-present
+      - run: npm test --if-present
+"""
+        elif stack_type == 'python':
+            return """name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt || true
+      - run: pytest || true
+"""
+        else:
+            return """name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "Configure your CI/CD here"
+"""

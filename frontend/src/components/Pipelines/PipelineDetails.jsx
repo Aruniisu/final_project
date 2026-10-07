@@ -1,97 +1,155 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
+import io from 'socket.io-client';
 import {
-  FiArrowLeft,
-  FiCheckCircle,
-  FiXCircle,
-  FiClock,
-  FiRefreshCw,
-  FiPlay,
-  FiPause,
-  FiStopCircle,
-  FiDownload,
-  FiCopy,
-  FiShare2,
-  FiAlertCircle,
-  FiActivity,
-  FiGitBranch,
-  FiUser,
-  FiCalendar,
-  FiCode,
+  FiArrowLeft, FiCheckCircle, FiXCircle, FiClock, FiRefreshCw,
+  FiPlay, FiStopCircle, FiDownload, FiCopy, FiAlertCircle,
+  FiActivity, FiGitBranch, FiUser, FiCalendar, FiCode,
+  FiExternalLink, FiTerminal,
 } from 'react-icons/fi';
-import { FaGithub } from 'react-icons/fa';
+import { FaGithub, FaRobot } from 'react-icons/fa';
 import toast from 'react-hot-toast';
-import { pipelineAPI } from '../../api/assistant';
+import { pipelineAPI, WS_URL } from '../../api/assistant';
+import './PipelineDashboard.css';
 
+// ============================================
+// Log Viewer
+// ============================================
 const LogViewer = ({ logs, isLive }) => {
-  const logEndRef = React.useRef(null);
+  const logEndRef = useRef(null);
 
-  React.useEffect(() => {
-    if (isLive) {
-      logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }
+  useEffect(() => {
+    if (isLive) logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs, isLive]);
 
   return (
-    <div className="bg-slate-900 rounded-xl p-4 font-mono text-sm overflow-x-auto">
-      <div className="space-y-0.5">
-        {logs.map((log, index) => (
-          <div key={index} className="flex items-start gap-3 text-xs">
-            <span className="text-slate-500 whitespace-nowrap">
+    <div style={{
+      background: 'rgba(0, 0, 0, 0.4)',
+      borderRadius: '12px',
+      padding: '16px',
+      fontFamily: 'JetBrains Mono, Monaco, monospace',
+      fontSize: '12px',
+      overflowX: 'auto',
+      maxHeight: '500px',
+      overflowY: 'auto',
+    }}>
+      {logs.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: '40px 0', color: 'rgba(255, 255, 255, 0.3)' }}>
+          <FiTerminal style={{ width: 24, height: 24, marginBottom: 8 }} />
+          <p>Waiting for logs...</p>
+        </div>
+      ) : (
+        logs.map((log, i) => (
+          <div key={i} style={{
+            display: 'flex',
+            gap: '12px',
+            padding: '2px 0',
+            borderLeft: `2px solid ${
+              log.level === 'error' ? '#f87171' :
+              log.level === 'warning' ? '#fbbf24' :
+              log.level === 'success' ? '#34d399' : '#475569'
+            }`,
+            paddingLeft: '10px',
+            marginBottom: '2px',
+          }}>
+            <span style={{ color: 'rgba(255, 255, 255, 0.3)', flexShrink: 0 }}>
               [{new Date(log.timestamp).toLocaleTimeString()}]
             </span>
-            <span className={`${
-              log.level === 'error' ? 'text-error-400' :
-              log.level === 'warning' ? 'text-warning-400' :
-              log.level === 'success' ? 'text-success-400' :
-              'text-slate-300'
-            }`}>
+            <span style={{
+              color: log.level === 'error' ? '#f87171' :
+                     log.level === 'warning' ? '#fbbf24' :
+                     log.level === 'success' ? '#34d399' :
+                     'rgba(255, 255, 255, 0.8)',
+            }}>
               {log.message}
             </span>
           </div>
-        ))}
-        {isLive && (
-          <div className="flex items-center gap-2 text-xs text-primary-400">
-            <span className="w-2 h-2 rounded-full bg-primary-400 animate-pulse" />
-            Streaming logs...
-          </div>
-        )}
-        <div ref={logEndRef} />
-      </div>
+        ))
+      )}
+      {isLive && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#a855f7', marginTop: 8 }}>
+          <span style={{
+            width: 8, height: 8, borderRadius: '50%',
+            background: '#a855f7',
+            animation: 'pulse 2s infinite',
+          }} />
+          Streaming logs...
+        </div>
+      )}
+      <div ref={logEndRef} />
     </div>
   );
 };
 
+// ============================================
+// Main Details Component
+// ============================================
 const PipelineDetails = () => {
   const { id } = useParams();
   const navigate = useNavigate();
   const [pipeline, setPipeline] = useState(null);
   const [loading, setLoading] = useState(true);
   const [logs, setLogs] = useState([]);
-  const [isLive, setIsLive] = useState(false);
+  const [isLive, setIsLive] = useState(true);
   const [selectedTab, setSelectedTab] = useState('overview');
+  const socketRef = useRef(null);
 
+  // Fetch pipeline details
   useEffect(() => {
     fetchPipelineDetails();
-    const interval = setInterval(() => {
-      if (pipeline?.status === 'running') {
-        fetchPipelineDetails();
-      }
-    }, 5000);
-    return () => clearInterval(interval);
   }, [id]);
+
+  // Setup Socket.IO for real-time logs
+  useEffect(() => {
+    const socket = io(WS_URL, {
+      transports: ['polling', 'websocket'],
+      reconnection: true,
+    });
+
+    socketRef.current = socket;
+
+    socket.on('connect', () => {
+      console.log('✅ Socket connected for logs');
+    });
+
+    socket.on('live_log', (data) => {
+      const level = data.level || data.type || 'info';
+      const message = data.message || data.log || '';
+      if (message) {
+        setLogs(prev => [...prev.slice(-500), {
+          timestamp: data.timestamp || new Date().toISOString(),
+          level,
+          message,
+        }]);
+      }
+    });
+
+    socket.on('agent_log', (data) => {
+      const level = data.level || 'info';
+      const message = data.message || '';
+      if (message) {
+        setLogs(prev => [...prev.slice(-500), {
+          timestamp: data.timestamp || new Date().toISOString(),
+          level,
+          message,
+        }]);
+      }
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, []);
 
   const fetchPipelineDetails = async () => {
     try {
       setLoading(true);
-      const response = await pipelineAPI.getDetails(id);
-      setPipeline(response || mockPipelineDetails);
-      setLogs(response?.logs || mockLogs);
+      const data = await pipelineAPI.getDetails(id);
+      setPipeline(data);
     } catch (error) {
-      console.error('Error fetching pipeline details:', error);
-      setPipeline(mockPipelineDetails);
-      setLogs(mockLogs);
+      console.error('Error fetching pipeline:', error);
+      toast.error('Failed to load pipeline');
     } finally {
       setLoading(false);
     }
@@ -99,8 +157,8 @@ const PipelineDetails = () => {
 
   const fetchLogs = async () => {
     try {
-      const response = await pipelineAPI.getLogs(id);
-      setLogs(response || mockLogs);
+      const data = await pipelineAPI.getLogs(id);
+      setLogs(data || []);
       toast.success('Logs refreshed');
     } catch (error) {
       toast.error('Failed to fetch logs');
@@ -109,43 +167,46 @@ const PipelineDetails = () => {
 
   const handleTrigger = async () => {
     try {
+      toast.loading('Triggering...', { id: 'action' });
       await pipelineAPI.trigger(id);
-      toast.success('Pipeline triggered');
+      toast.success('Pipeline triggered', { id: 'action' });
       fetchPipelineDetails();
     } catch (error) {
-      toast.error('Failed to trigger pipeline');
+      toast.error('Failed to trigger', { id: 'action' });
     }
   };
 
   const handleRetry = async () => {
     try {
+      toast.loading('Retrying...', { id: 'action' });
       await pipelineAPI.retry(id);
-      toast.success('Retry started');
+      toast.success('Retry started', { id: 'action' });
       fetchPipelineDetails();
     } catch (error) {
-      toast.error('Failed to retry');
+      toast.error('Failed to retry', { id: 'action' });
     }
   };
 
   const handleCancel = async () => {
     try {
+      toast.loading('Stopping...', { id: 'action' });
       await pipelineAPI.cancel(id);
-      toast.success('Pipeline cancelled');
+      toast.success('Pipeline stopped', { id: 'action' });
       fetchPipelineDetails();
     } catch (error) {
-      toast.error('Failed to cancel');
+      toast.error('Failed to cancel', { id: 'action' });
     }
   };
 
   const handleCopyLogs = () => {
-    const logText = logs.map(l => `[${new Date(l.timestamp).toLocaleTimeString()}] ${l.message}`).join('\n');
-    navigator.clipboard.writeText(logText);
-    toast.success('Logs copied to clipboard');
+    const text = logs.map(l => `[${new Date(l.timestamp).toLocaleTimeString()}] ${l.message}`).join('\n');
+    navigator.clipboard.writeText(text);
+    toast.success('Logs copied!');
   };
 
   const handleDownloadLogs = () => {
-    const logText = logs.map(l => `[${new Date(l.timestamp).toLocaleTimeString()}] ${l.message}`).join('\n');
-    const blob = new Blob([logText], { type: 'text/plain' });
+    const text = logs.map(l => `[${new Date(l.timestamp).toLocaleTimeString()}] ${l.message}`).join('\n');
+    const blob = new Blob([text], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -155,38 +216,13 @@ const PipelineDetails = () => {
     toast.success('Logs downloaded');
   };
 
-  const getStatusConfig = (status) => {
-    switch (status) {
-      case 'running':
-        return { icon: FiActivity, color: 'text-primary-500', bgColor: 'bg-primary-500/10', label: 'Running' };
-      case 'success':
-        return { icon: FiCheckCircle, color: 'text-success-500', bgColor: 'bg-success-500/10', label: 'Success' };
-      case 'failed':
-        return { icon: FiXCircle, color: 'text-error-500', bgColor: 'bg-error-500/10', label: 'Failed' };
-      case 'pending':
-        return { icon: FiClock, color: 'text-warning-500', bgColor: 'bg-warning-500/10', label: 'Pending' };
-      case 'cancelled':
-        return { icon: FiStopCircle, color: 'text-slate-500', bgColor: 'bg-slate-500/10', label: 'Cancelled' };
-      default:
-        return { icon: FiGitBranch, color: 'text-slate-500', bgColor: 'bg-slate-500/10', label: 'Unknown' };
-    }
-  };
-
   if (loading) {
     return (
-      <div className="space-y-4 animate-pulse">
-        <div className="flex items-center gap-4">
-          <div className="h-10 w-10 bg-slate-200 dark:bg-slate-700 rounded-xl"></div>
-          <div className="flex-1">
-            <div className="h-6 w-48 bg-slate-200 dark:bg-slate-700 rounded"></div>
-            <div className="h-4 w-64 bg-slate-200 dark:bg-slate-700 rounded mt-1"></div>
-          </div>
-        </div>
-        <div className="glass-card p-6">
-          <div className="space-y-4">
-            <div className="h-20 bg-slate-200 dark:bg-slate-700 rounded-xl"></div>
-            <div className="h-40 bg-slate-200 dark:bg-slate-700 rounded-xl"></div>
-          </div>
+      <div className="pipeline-dashboard">
+        <div className="pipeline-skeleton">
+          <div className="skeleton-row short" />
+          <div className="skeleton-row medium" />
+          <div className="skeleton-row full" />
         </div>
       </div>
     );
@@ -194,106 +230,95 @@ const PipelineDetails = () => {
 
   if (!pipeline) {
     return (
-      <div className="text-center py-12">
-        <div className="w-16 h-16 rounded-2xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center mx-auto">
-          <FiAlertCircle className="w-8 h-8 text-slate-400" />
+      <div className="pipeline-dashboard">
+        <div className="pipeline-empty">
+          <div className="pipeline-empty-icon">
+            <FiAlertCircle />
+          </div>
+          <h3 className="pipeline-empty-title">Pipeline not found</h3>
+          <p className="pipeline-empty-text">The pipeline you're looking for doesn't exist</p>
+          <button className="pipeline-empty-btn" onClick={() => navigate('/pipelines')}>
+            <FiArrowLeft />
+            Back to Pipelines
+          </button>
         </div>
-        <p className="text-sm text-slate-500 dark:text-slate-400 mt-2">Pipeline not found</p>
-        <button
-          onClick={() => navigate('/pipelines')}
-          className="mt-4 px-4 py-2 bg-primary-500 text-white rounded-xl"
-        >
-          Back to Pipelines
-        </button>
       </div>
     );
   }
 
-  const statusConfig = getStatusConfig(pipeline.status);
-  const StatusIcon = statusConfig.icon;
+  const statusConfig = {
+    running: { icon: FiActivity, label: 'Running' },
+    success: { icon: FiCheckCircle, label: 'Live' },
+    failed: { icon: FiXCircle, label: 'Failed' },
+    pending: { icon: FiClock, label: 'Pending' },
+    cancelled: { icon: FiStopCircle, label: 'Stopped' },
+  };
+  const sc = statusConfig[pipeline.status] || statusConfig.pending;
+  const StatusIcon = sc.icon;
 
   return (
-    <div className="space-y-6">
+    <div className="pipeline-dashboard">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-        <div className="flex items-center gap-4">
-          <button
-            onClick={() => navigate('/pipelines')}
-            className="p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-          >
-            <FiArrowLeft className="w-5 h-5 text-slate-600 dark:text-slate-400" />
-          </button>
-          <div>
-            <div className="flex items-center gap-3">
-              <h2 className="text-2xl font-bold text-slate-900 dark:text-white">
-                {pipeline.name || 'Pipeline Details'}
-              </h2>
-              <div className={`flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${statusConfig.bgColor} ${statusConfig.color}`}>
-                <StatusIcon className="w-3 h-3" />
-                <span>{statusConfig.label}</span>
+      <div className="pipeline-header">
+        <div className="pipeline-header-left">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+            <button
+              onClick={() => navigate('/pipelines')}
+              style={{
+                width: 40, height: 40, borderRadius: 12,
+                background: 'rgba(255, 255, 255, 0.04)',
+                border: '1px solid rgba(255, 255, 255, 0.08)',
+                color: 'rgba(255, 255, 255, 0.7)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                cursor: 'pointer',
+              }}
+            >
+              <FiArrowLeft />
+            </button>
+            <h1 className="pipeline-title">
+              <div className={`pipeline-status-icon ${pipeline.status}`}>
+                <StatusIcon />
               </div>
-            </div>
-            <div className="flex items-center gap-3 text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-              <FaGithub className="w-3 h-3" />
-              <span>{pipeline.repo || 'repo/main'}</span>
-              <span>•</span>
-              <FiCode className="w-3 h-3" />
-              <span>{pipeline.commit || 'abc1234'}</span>
-              <span>•</span>
-              <FiUser className="w-3 h-3" />
-              <span>{pipeline.triggeredBy || 'User'}</span>
-              <span>•</span>
-              <FiCalendar className="w-3 h-3" />
-              <span>{new Date(pipeline.createdAt).toLocaleString()}</span>
-            </div>
+              {pipeline.name}
+            </h1>
           </div>
+          <p className="pipeline-subtitle" style={{ marginLeft: 56 }}>
+            {pipeline.repo} • {pipeline.deployType}
+          </p>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={fetchPipelineDetails}
-            className="p-2 rounded-xl bg-white/50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 hover:bg-white dark:hover:bg-slate-800 transition-all"
-          >
-            <FiRefreshCw className="w-4 h-4 text-slate-600 dark:text-slate-400" />
+        <div className="pipeline-header-actions">
+          <button className="pipeline-refresh-btn" onClick={fetchPipelineDetails} title="Refresh">
+            <FiRefreshCw />
           </button>
-          {pipeline.status === 'pending' || pipeline.status === 'failed' ? (
-            <button
-              onClick={handleTrigger}
-              className="px-4 py-2 bg-primary-500 text-white rounded-xl font-medium hover:bg-primary-600 transition-colors flex items-center gap-2"
+          {pipeline.url && (
+            <a
+              href={pipeline.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="pipeline-live-link"
             >
-              <FiPlay className="w-4 h-4" />
-              Trigger
-            </button>
-          ) : pipeline.status === 'running' ? (
-            <button
-              onClick={handleCancel}
-              className="px-4 py-2 bg-error-500 text-white rounded-xl font-medium hover:bg-error-600 transition-colors flex items-center gap-2"
-            >
-              <FiStopCircle className="w-4 h-4" />
-              Cancel
-            </button>
-          ) : pipeline.status === 'success' ? (
-            <button
-              onClick={handleRetry}
-              className="px-4 py-2 bg-primary-500 text-white rounded-xl font-medium hover:bg-primary-600 transition-colors flex items-center gap-2"
-            >
-              <FiRefreshCw className="w-4 h-4" />
-              Retry
-            </button>
-          ) : null}
+              <FiExternalLink />
+              Open Live
+            </a>
+          )}
         </div>
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-1 border-b border-slate-200 dark:border-slate-700">
-        {['overview', 'logs', 'steps', 'metrics'].map((tab) => (
+      <div style={{
+        display: 'flex',
+        gap: 4,
+        padding: 4,
+        background: 'rgba(255, 255, 255, 0.03)',
+        border: '1px solid rgba(255, 255, 255, 0.06)',
+        borderRadius: 14,
+        width: 'fit-content',
+      }}>
+        {['overview', 'logs', 'steps'].map(tab => (
           <button
             key={tab}
             onClick={() => setSelectedTab(tab)}
-            className={`px-4 py-2 text-sm font-medium transition-all ${
-              selectedTab === tab
-                ? 'text-primary-500 border-b-2 border-primary-500'
-                : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300'
-            }`}
+            className={`filter-pill ${selectedTab === tab ? 'active' : ''}`}
           >
             {tab.charAt(0).toUpperCase() + tab.slice(1)}
           </button>
@@ -307,91 +332,47 @@ const PipelineDetails = () => {
             key="overview"
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -10 }}
-            className="space-y-4"
+            className="pipeline-stats"
+            style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}
           >
-            {/* Progress */}
-            <div className="glass-card p-6">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-sm text-slate-500 dark:text-slate-400">Progress</span>
-                <span className="text-sm font-medium text-slate-900 dark:text-white">
-                  {pipeline.progress || 0}%
-                </span>
+            <div className="stat-card" style={{ '--stat-color': '#a855f7' }}>
+              <div className="stat-card-header">
+                <span className="stat-label">Progress</span>
               </div>
-              <div className="w-full h-2 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
+              <div className="stat-value">{pipeline.progress || 0}%</div>
+              <div className="pipeline-progress-track" style={{ marginTop: 12 }}>
                 <div
-                  className={`h-full rounded-full ${
-                    pipeline.status === 'success' ? 'bg-success-500' :
-                    pipeline.status === 'failed' ? 'bg-error-500' :
-                    pipeline.status === 'running' ? 'bg-primary-500' :
-                    'bg-slate-400'
-                  } transition-all duration-500`}
+                  className={`pipeline-progress-fill ${pipeline.status}`}
                   style={{ width: `${pipeline.progress || 0}%` }}
                 />
               </div>
             </div>
 
-            {/* Steps */}
-            <div className="glass-card p-6">
-              <h3 className="text-sm font-semibold text-slate-900 dark:text-white mb-4">
-                Pipeline Steps
-              </h3>
-              <div className="space-y-3">
-                {(pipeline.steps || []).map((step, index) => {
-                  const stepStatus = getStatusConfig(step.status);
-                  const StepIcon = stepStatus.icon;
-                  return (
-                    <div key={index} className="flex items-center gap-4 p-3 bg-white/50 dark:bg-slate-800/50 rounded-xl">
-                      <div className={`p-2 rounded-lg ${stepStatus.bgColor} ${stepStatus.color}`}>
-                        <StepIcon className="w-4 h-4" />
-                      </div>
-                      <div className="flex-1">
-                        <div className="flex items-center justify-between">
-                          <span className="text-sm font-medium text-slate-900 dark:text-white">
-                            {step.name}
-                          </span>
-                          <span className={`text-xs font-medium ${stepStatus.color}`}>
-                            {stepStatus.label}
-                          </span>
-                        </div>
-                        {step.duration && step.duration !== '—' && (
-                          <span className="text-xs text-slate-500 dark:text-slate-400">
-                            Duration: {step.duration}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
+            <div className="stat-card" style={{ '--stat-color': '#10b981' }}>
+              <div className="stat-card-header">
+                <span className="stat-label">Status</span>
+                <div className="stat-icon"><StatusIcon /></div>
               </div>
+              <div className="stat-value" style={{ fontSize: 20 }}>{sc.label}</div>
+              <div className="stat-sub">Current state</div>
             </div>
 
-            {/* Info */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <div className="glass-card p-4 text-center">
-                <p className="text-xs text-slate-500 dark:text-slate-400">Duration</p>
-                <p className="text-lg font-bold text-slate-900 dark:text-white">
-                  {pipeline.duration || '—'}
-                </p>
+            <div className="stat-card" style={{ '--stat-color': '#3b82f6' }}>
+              <div className="stat-card-header">
+                <span className="stat-label">Duration</span>
+                <div className="stat-icon"><FiClock /></div>
               </div>
-              <div className="glass-card p-4 text-center">
-                <p className="text-xs text-slate-500 dark:text-slate-400">Triggered By</p>
-                <p className="text-lg font-bold text-slate-900 dark:text-white">
-                  {pipeline.triggeredBy || '—'}
-                </p>
+              <div className="stat-value" style={{ fontSize: 20 }}>{pipeline.duration || '—'}</div>
+              <div className="stat-sub">Total runtime</div>
+            </div>
+
+            <div className="stat-card" style={{ '--stat-color': '#f59e0b' }}>
+              <div className="stat-card-header">
+                <span className="stat-label">Type</span>
+                <div className="stat-icon"><FiGitBranch /></div>
               </div>
-              <div className="glass-card p-4 text-center">
-                <p className="text-xs text-slate-500 dark:text-slate-400">Commit</p>
-                <p className="text-lg font-bold text-slate-900 dark:text-white">
-                  {pipeline.commit?.slice(0, 7) || '—'}
-                </p>
-              </div>
-              <div className="glass-card p-4 text-center">
-                <p className="text-xs text-slate-500 dark:text-slate-400">Branch</p>
-                <p className="text-lg font-bold text-slate-900 dark:text-white">
-                  {pipeline.branch || 'main'}
-                </p>
-              </div>
+              <div className="stat-value" style={{ fontSize: 20 }}>{pipeline.deployType || 'auto'}</div>
+              <div className="stat-sub">Deploy method</div>
             </div>
           </motion.div>
         )}
@@ -401,43 +382,29 @@ const PipelineDetails = () => {
             key="logs"
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -10 }}
-            className="space-y-4"
+            style={{ display: 'flex', flexDirection: 'column', gap: 16 }}
           >
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <h3 className="text-sm font-semibold text-slate-900 dark:text-white">Logs</h3>
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={() => setIsLive(!isLive)}
-                    className={`px-2 py-1 rounded-lg text-xs transition-colors ${
-                      isLive
-                        ? 'bg-primary-500 text-white'
-                        : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'
-                    }`}
-                  >
-                    {isLive ? '🔴 Live' : '⏸ Paused'}
-                  </button>
-                </div>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <button
+                  onClick={() => setIsLive(!isLive)}
+                  className={`filter-pill ${isLive ? 'active' : ''}`}
+                >
+                  {isLive ? '🔴 Live' : '⏸ Paused'}
+                </button>
+                <span style={{ fontSize: 12, color: 'rgba(255, 255, 255, 0.5)' }}>
+                  {logs.length} logs
+                </span>
               </div>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={fetchLogs}
-                  className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-                >
-                  <FiRefreshCw className="w-4 h-4 text-slate-600 dark:text-slate-400" />
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button className="action-btn logs" onClick={fetchLogs}>
+                  <FiRefreshCw /> Refresh
                 </button>
-                <button
-                  onClick={handleCopyLogs}
-                  className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-                >
-                  <FiCopy className="w-4 h-4 text-slate-600 dark:text-slate-400" />
+                <button className="action-btn logs" onClick={handleCopyLogs}>
+                  <FiCopy /> Copy
                 </button>
-                <button
-                  onClick={handleDownloadLogs}
-                  className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-                >
-                  <FiDownload className="w-4 h-4 text-slate-600 dark:text-slate-400" />
+                <button className="action-btn logs" onClick={handleDownloadLogs}>
+                  <FiDownload /> Download
                 </button>
               </div>
             </div>
@@ -450,98 +417,52 @@ const PipelineDetails = () => {
             key="steps"
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -10 }}
-            className="space-y-4"
+            className="pipeline-list"
           >
-            <h3 className="text-sm font-semibold text-slate-900 dark:text-white">
-              Step Details
-            </h3>
-            {(pipeline.steps || []).map((step, index) => (
-              <div key={index} className="glass-card p-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className={`p-2 rounded-lg ${getStatusConfig(step.status).bgColor} ${getStatusConfig(step.status).color}`}>
-                        {React.createElement(getStatusConfig(step.status).icon, { className: "w-4 h-4" })}
+            {(pipeline.steps || []).map((step, i) => (
+              <div key={i} className="pipeline-card">
+                <div className="pipeline-card-header">
+                  <div className="pipeline-card-left">
+                    <div className={`pipeline-status-icon ${step.status}`}>
+                      {step.status === 'completed' ? <FiCheckCircle /> :
+                       step.status === 'running' ? <FiActivity /> :
+                       step.status === 'failed' ? <FiXCircle /> : <FiClock />}
                     </div>
-                    <div>
-                      <h4 className="text-sm font-medium text-slate-900 dark:text-white">
-                        {step.name}
-                      </h4>
-                      <p className="text-xs text-slate-500 dark:text-slate-400">
-                        Duration: {step.duration || '—'}
-                      </p>
+                    <div className="pipeline-info">
+                      <h3 className="pipeline-name">{step.name}</h3>
+                      <div className="pipeline-meta">
+                        <span className="pipeline-meta-item">
+                          <FiClock />
+                          {step.duration || '—'}
+                        </span>
+                      </div>
                     </div>
                   </div>
-                  <span className={`text-xs font-medium ${getStatusConfig(step.status).color}`}>
-                    {getStatusConfig(step.status).label}
-                  </span>
-                </div>
-                {step.error && (
-                  <div className="mt-2 p-2 rounded-lg bg-error/10 text-error text-xs">
-                    {step.error}
-                  </div>
-                )}
-              </div>
-            ))}
-          </motion.div>
-        )}
-
-        {selectedTab === 'metrics' && (
-          <motion.div
-            key="metrics"
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -10 }}
-            className="grid grid-cols-2 md:grid-cols-4 gap-4"
-          >
-            {['CPU Usage', 'Memory Usage', 'Build Time', 'Success Rate'].map((metric) => (
-              <div key={metric} className="glass-card p-4 text-center">
-                <p className="text-xs text-slate-500 dark:text-slate-400">{metric}</p>
-                <p className="text-xl font-bold text-slate-900 dark:text-white mt-1">
-                  {Math.floor(Math.random() * 100)}%
-                </p>
-                <div className="w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-full mt-2 overflow-hidden">
-                  <div
-                    className="h-full bg-primary-500 rounded-full"
-                    style={{ width: `${Math.floor(Math.random() * 100)}%` }}
-                  />
                 </div>
               </div>
             ))}
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Actions */}
+      <div className="pipeline-actions" style={{ marginTop: 16 }}>
+        {pipeline.status === 'failed' || pipeline.status === 'pending' ? (
+          <button className="action-btn trigger" onClick={handleTrigger}>
+            <FiPlay /> Trigger
+          </button>
+        ) : pipeline.status === 'running' ? (
+          <button className="action-btn stop" onClick={handleCancel}>
+            <FiStopCircle /> Stop
+          </button>
+        ) : pipeline.status === 'success' ? (
+          <button className="action-btn redeploy" onClick={handleRetry}>
+            <FiRefreshCw /> Redeploy
+          </button>
+        ) : null}
+      </div>
     </div>
   );
 };
-
-// Mock data
-const mockPipelineDetails = {
-  id: '1',
-  name: 'Frontend Deployment',
-  repo: 'org/frontend-app',
-  commit: 'abc1234',
-  status: 'running',
-  progress: 68,
-  duration: '2m 34s',
-  triggeredBy: 'John Doe',
-  branch: 'main',
-  steps: [
-    { name: 'Build', status: 'completed', duration: '2m 34s' },
-    { name: 'Test', status: 'completed', duration: '1m 12s' },
-    { name: 'Deploy', status: 'running', duration: '—' },
-    { name: 'Monitor', status: 'pending', duration: '—' },
-  ],
-  createdAt: new Date().toISOString(),
-};
-
-const mockLogs = [
-  { timestamp: new Date(Date.now() - 60000).toISOString(), level: 'info', message: 'Starting build process...' },
-  { timestamp: new Date(Date.now() - 45000).toISOString(), level: 'info', message: 'Installing dependencies...' },
-  { timestamp: new Date(Date.now() - 30000).toISOString(), level: 'success', message: 'Dependencies installed successfully' },
-  { timestamp: new Date(Date.now() - 15000).toISOString(), level: 'info', message: 'Running tests...' },
-  { timestamp: new Date(Date.now() - 5000).toISOString(), level: 'success', message: 'All tests passed (42 tests)' },
-  { timestamp: new Date().toISOString(), level: 'info', message: 'Starting deployment...' },
-];
 
 export default PipelineDetails;

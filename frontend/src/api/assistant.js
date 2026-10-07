@@ -1,35 +1,35 @@
+/**
+ * Assistant API Client — Full Premium + Agentic AI
+ */
+
 import axios from 'axios';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || '/api';
-
-// ============================================
-// WebSocket URL (for socket.io)
-// ============================================
 export const WS_URL = process.env.REACT_APP_WS_URL || 'http://localhost:5000';
 export const API_BASE = API_BASE_URL;
+const DEVOPS_BASE = process.env.REACT_APP_WS_URL || 'http://localhost:5000';
 
-// Create axios instance
 const api = axios.create({
     baseURL: API_BASE_URL,
     timeout: 30000,
-    headers: {
-        'Content-Type': 'application/json',
-    },
+    headers: { 'Content-Type': 'application/json' },
 });
 
-// Add auth token to requests
+const devopsApi = axios.create({
+    baseURL: DEVOPS_BASE,
+    timeout: 600000,
+    headers: { 'Content-Type': 'application/json' },
+});
+
 api.interceptors.request.use(
     (config) => {
         const token = localStorage.getItem('token');
-        if (token) {
-            config.headers.Authorization = `Bearer ${token}`;
-        }
+        if (token) config.headers.Authorization = `Bearer ${token}`;
         return config;
     },
     (error) => Promise.reject(error)
 );
 
-// Handle response errors
 api.interceptors.response.use(
     (response) => response,
     (error) => {
@@ -42,62 +42,72 @@ api.interceptors.response.use(
 );
 
 // ============================================
+// HELPERS
+// ============================================
+function isPublicUrl(url) {
+    if (!url) return false;
+    if (typeof url !== 'string') return false;
+    if (url.includes('localhost')) return false;
+    if (url.includes('127.0.0.1')) return false;
+    if (url.includes('192.168.')) return false;
+    if (url.includes('10.')) return false;
+    if (!url.startsWith('http://') && !url.startsWith('https://')) return false;
+    return true;
+}
+
+function deploymentToPipeline(d) {
+    const hasPublicUrl = isPublicUrl(d.url);
+    const isDeployed = d.frontend_ready || d.backend_ready;
+    let status;
+    if (d.status === 'stopped') status = 'cancelled';
+    else if (d.status === 'deploying') status = 'running';
+    else if (d.status === 'failed') status = 'failed';
+    else if (isDeployed && hasPublicUrl) status = 'success';
+    else if (isDeployed && !hasPublicUrl) status = 'running';
+    else status = 'failed';
+
+    let progress = 0;
+    if (status === 'success') progress = 100;
+    else if (status === 'running') progress = 50;
+    else if (status === 'cancelled') progress = 100;
+
+    return {
+        id: d.id || d.deploy_id,
+        name: `${d.owner || 'user'}/${d.repo || 'app'}`,
+        repo: `${d.owner || 'user'}/${d.repo || 'app'}`,
+        owner: d.owner,
+        repoName: d.repo,
+        url: hasPublicUrl ? d.url : null,
+        rawUrl: d.url,
+        status,
+        deployType: d.deploy_type || 'auto',
+        frontendReady: d.frontend_ready || false,
+        backendReady: d.backend_ready || false,
+        progress,
+        duration: d.duration || '—',
+        createdAt: d.deployed_at ? new Date(d.deployed_at * 1000).toISOString() : new Date().toISOString(),
+        steps: [
+            { name: 'Clone', status: 'completed', duration: '3s' },
+            { name: 'Build', status: 'completed', duration: '25s' },
+            { name: 'Deploy', status: 'completed', duration: '5s' },
+            { name: 'Live', status: status === 'success' ? 'completed' : 'running', duration: '2s' },
+        ],
+    };
+}
+
+// ============================================
 // AUTH API
 // ============================================
 export const authAPI = {
-    register: async (userData) => {
-        try {
-            const response = await api.post('/auth/register', userData);
-            return response.data;
-        } catch (error) {
-            console.error('Register error:', error);
-            throw error;
-        }
-    },
-    login: async (credentials) => {
-        try {
-            const response = await api.post('/auth/login', credentials);
-            return response.data;
-        } catch (error) {
-            console.error('Login error:', error);
-            throw error;
-        }
-    },
-    getMe: async () => {
-        try {
-            const response = await api.get('/auth/me');
-            return response.data;
-        } catch (error) {
-            console.error('Get user error:', error);
-            throw error;
-        }
-    },
+    register: async (userData) => (await api.post('/auth/register', userData)).data,
+    login: async (credentials) => (await api.post('/auth/login', credentials)).data,
+    getMe: async () => (await api.get('/auth/me')).data,
     logout: async () => {
-        try {
-            await api.post('/auth/logout');
-            localStorage.removeItem('token');
-        } catch (error) {
-            console.error('Logout error:', error);
-        }
+        try { await api.post('/auth/logout'); } catch (e) {}
+        localStorage.removeItem('token');
     },
-    updateProfile: async (data) => {
-        try {
-            const response = await api.put('/auth/profile', data);
-            return response.data;
-        } catch (error) {
-            console.error('Update profile error:', error);
-            throw error;
-        }
-    },
-    changePassword: async (data) => {
-        try {
-            const response = await api.post('/auth/change-password', data);
-            return response.data;
-        } catch (error) {
-            console.error('Change password error:', error);
-            throw error;
-        }
-    }
+    updateProfile: async (data) => (await api.put('/auth/profile', data)).data,
+    changePassword: async (data) => (await api.post('/auth/change-password', data)).data,
 };
 
 // ============================================
@@ -105,337 +115,170 @@ export const authAPI = {
 // ============================================
 export const assistantAPI = {
     sendQuery: async (query, context = {}) => {
-        try {
-            const response = await api.post('/assistant/query', {
-                query,
-                context,
-                timestamp: new Date().toISOString(),
-            });
-            return response.data;
-        } catch (error) {
-            console.error('Error sending query:', error);
-            return {
-                response: `I received your query: "${query}". I'm here to help with DevOps tasks!`,
-                tools: ['devops', 'automation'],
-                message: 'Query processed successfully (mock)'
-            };
-        }
+        try { return (await api.post('/assistant/query', { query, context })).data; }
+        catch { return { response: `Received: "${query}"`, message: 'Mock' }; }
     },
-
     chat: async (payload) => {
-        try {
-            const response = await api.post('/assistant/chat', payload);
-            return response.data;
-        } catch (error) {
-            console.error('Chat error:', error);
-            return {
-                message: `✅ Received: "${payload.message}"`,
-                execution: {
-                    status: 'completed',
-                    progress: 100,
-                    duration: '0.5s',
-                    steps: [
-                        { name: 'Analyze request', status: 'completed', duration: '0.2s' },
-                        { name: 'Execute', status: 'completed', duration: '0.3s' },
-                    ],
-                },
-            };
-        }
+        try { return (await api.post('/assistant/chat', payload)).data; }
+        catch { return { message: 'Mock chat', execution: { status: 'completed', progress: 100 } }; }
     },
-
     getHistory: async (limit = 50, offset = 0) => {
-        try {
-            const response = await api.get('/assistant/history', {
-                params: { limit, offset },
-            });
-            return response.data;
-        } catch (error) {
-            console.error('Error getting history:', error);
-            return [];
-        }
+        try { return (await api.get('/assistant/history', { params: { limit, offset } })).data; }
+        catch { return []; }
     },
-
     clearHistory: async (userId) => {
-        try {
-            const response = await api.delete(`/assistant/history/${userId}`);
-            return response.data;
-        } catch (error) {
-            console.error('Error clearing history:', error);
-            return { success: true };
-        }
+        try { return (await api.delete(`/assistant/history/${userId}`)).data; }
+        catch { return { success: true }; }
     },
-
     sendFeedback: async (messageId, feedback) => {
-        try {
-            const response = await api.post('/assistant/feedback', {
-                messageId,
-                feedback,
-                timestamp: new Date().toISOString(),
-            });
-            return response.data;
-        } catch (error) {
-            console.error('Error sending feedback:', error);
-            return { success: false };
-        }
+        try { return (await api.post('/assistant/feedback', { messageId, feedback })).data; }
+        catch { return { success: false }; }
     },
-
     getSuggestions: async (context = '') => {
-        try {
-            const response = await api.get('/assistant/suggestions', {
-                params: { context },
-            });
-            return response.data;
-        } catch (error) {
-            console.error('Error getting suggestions:', error);
-            return ['Deploy to production', 'Check pipeline status', 'Monitor system health'];
-        }
+        try { return (await api.get('/assistant/suggestions', { params: { context } })).data; }
+        catch { return ['Deploy app', 'Check pipeline', 'Monitor system']; }
     },
-
     getStatus: async () => {
-        try {
-            const response = await api.get('/assistant/status');
-            return response.data;
-        } catch (error) {
-            console.error('Error getting status:', error);
-            return {
-                status: 'online',
-                version: '2.3.1',
-                uptime: '99.9%',
-                models: 5
-            };
-        }
+        try { return (await api.get('/assistant/status')).data; }
+        catch { return { status: 'online', version: '3.0.0' }; }
     },
 };
 
 // ============================================
-// UPLOAD API (OPTIONAL)
+// UPLOAD API
 // ============================================
 export const uploadAPI = {
     uploadFiles: async (files, onProgress) => {
         const formData = new FormData();
-        files.forEach((file) => {
-            formData.append('files', file);
-        });
+        files.forEach((file) => formData.append('files', file));
         try {
-            const response = await api.post('/upload/files', formData, {
+            return (await api.post('/upload/files', formData, {
                 headers: { 'Content-Type': 'multipart/form-data' },
                 onUploadProgress: onProgress,
-            });
-            return response.data;
-        } catch (error) {
-            console.error('Upload error:', error);
-            return {
-                projectId: 'mock-' + Date.now(),
-                projectName: files[0]?.name || 'Uploaded Project',
-                message: 'Upload successful (mock)',
-                analysis: { healthScore: 85, issues: 3, securityScore: 92, recommendations: 5 }
-            };
-        }
+            })).data;
+        } catch { return { projectId: 'mock-' + Date.now(), projectName: files[0]?.name || 'Project' }; }
     },
-
     uploadProject: async (file, onProgress) => {
         const formData = new FormData();
         formData.append('project', file);
         try {
-            const response = await api.post('/upload/project', formData, {
+            return (await api.post('/upload/project', formData, {
                 headers: { 'Content-Type': 'multipart/form-data' },
                 onUploadProgress: onProgress,
-            });
-            return response.data;
-        } catch (error) {
-            console.error('Upload project error:', error);
-            return {
-                projectId: 'mock-' + Date.now(),
-                projectName: file?.name || 'Project',
-                success: true,
-                analysis: { healthScore: 85 }
-            };
-        }
+            })).data;
+        } catch { return { projectId: 'mock-' + Date.now(), projectName: file?.name || 'Project' }; }
     },
-
     uploadGitHub: async (url) => {
-        try {
-            const response = await api.post('/upload/github', { url });
-            return response.data;
-        } catch (error) {
-            console.error('GitHub upload error:', error);
-            return {
-                projectId: 'github-' + Date.now(),
-                projectName: url.split('/').pop() || 'GitHub Project',
-                message: 'GitHub import successful (mock)',
-                analysis: { healthScore: 85, issues: 3, securityScore: 92, recommendations: 5 }
-            };
-        }
+        try { return (await api.post('/upload/github', { url })).data; }
+        catch { return { projectId: 'github-' + Date.now(), projectName: url.split('/').pop() }; }
     },
-
     uploadDrive: async (url) => {
-        try {
-            const response = await api.post('/upload/drive', { url });
-            return response.data;
-        } catch (error) {
-            console.error('Drive upload error:', error);
-            return {
-                projectId: 'drive-' + Date.now(),
-                projectName: 'Drive Project',
-                message: 'Drive import successful (mock)',
-                analysis: { healthScore: 78, issues: 5, securityScore: 85, recommendations: 8 }
-            };
-        }
+        try { return (await api.post('/upload/drive', { url })).data; }
+        catch { return { projectId: 'drive-' + Date.now(), projectName: 'Drive Project' }; }
     },
-
     uploadLink: async (url) => {
-        try {
-            const response = await api.post('/upload/link', { url });
-            return response.data;
-        } catch (error) {
-            console.error('Link upload error:', error);
-            return {
-                projectId: 'link-' + Date.now(),
-                projectName: url.split('/').pop() || 'Link Project',
-                message: 'Link import successful (mock)',
-                analysis: { healthScore: 70, issues: 4, securityScore: 80, recommendations: 6 }
-            };
-        }
+        try { return (await api.post('/upload/link', { url })).data; }
+        catch { return { projectId: 'link-' + Date.now(), projectName: 'Link Project' }; }
     },
-
     getAnalysis: async (projectId) => {
-        try {
-            const response = await api.get(`/upload/${projectId}/analyze`);
-            return response.data;
-        } catch (error) {
-            console.error('Get analysis error:', error);
-            return {
-                healthScore: 85, issues: 3, securityScore: 92, recommendations: 5,
-                project_type: 'javascript',
-            };
-        }
+        try { return (await api.get(`/upload/${projectId}/analyze`)).data; }
+        catch { return { healthScore: 85 }; }
     },
-
     getHistory: async () => {
-        try {
-            const response = await api.get('/upload/history');
-            return response.data;
-        } catch (error) {
-            console.error('Get history error:', error);
-            return [];
-        }
+        try { return (await api.get('/upload/history')).data; }
+        catch { return []; }
     },
-
     deleteProject: async (projectId) => {
-        try {
-            const response = await api.delete(`/upload/${projectId}`);
-            return response.data;
-        } catch (error) {
-            console.error('Delete project error:', error);
-            return { success: true };
-        }
+        try { return (await api.delete(`/upload/${projectId}`)).data; }
+        catch { return { success: true }; }
     },
 };
 
 // ============================================
-// PIPELINE API
+// PIPELINE API — UPDATED with auto_deploy + run_pipeline
 // ============================================
 export const pipelineAPI = {
     getAll: async () => {
         try {
-            const response = await api.get('/pipelines');
-            return response.data;
-        } catch (error) {
-            console.error('Get pipelines error:', error);
-            return [];
-        }
+            const response = await devopsApi.get('/api/devops/deployments');
+            const data = response.data;
+            if (!data.success) return [];
+            const deployments = data.deployments || {};
+            const latestByRepo = {};
+            Object.values(deployments).forEach(d => {
+                const key = `${d.owner || 'user'}/${d.repo || 'app'}`;
+                const existing = latestByRepo[key];
+                const currentTime = d.deployed_at || 0;
+                const existingTime = existing?.deployed_at || 0;
+                if (!existing || currentTime > existingTime) latestByRepo[key] = d;
+            });
+            return Object.values(latestByRepo)
+                .map(deploymentToPipeline)
+                .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+        } catch { return []; }
     },
     getDetails: async (id) => {
         try {
-            const response = await api.get(`/pipelines/${id}`);
-            return response.data;
-        } catch (error) {
-            console.error('Get pipeline details error:', error);
-            return { id, status: 'running', progress: 50, steps: [] };
-        }
+            const all = await pipelineAPI.getAll();
+            return all.find(p => p.id === id) || null;
+        } catch { return null; }
     },
+    // ⭐ UPDATED: Same logic as chat — ci-cd+deploy mode
     create: async (data) => {
         try {
-            const response = await api.post('/pipelines', data);
-            return response.data;
+            const mode = data.mode || 'ci-cd+deploy';
+            const autoDeploy = data.autoDeploy !== false && data.auto_deploy !== false;
+            const shouldDeploy = autoDeploy && mode.includes('deploy');
+            const shouldRunPipeline = mode.includes('ci-cd');
+
+            return (await devopsApi.post('/api/devops/pipeline', {
+                repo_url: data.repoUrl || data.repo_url,
+                mode: mode,
+                deploy_method: data.deployMethod || data.deploy_method || 'self-host',
+                provider: data.provider || 'self-host',
+                max_fix_attempts: data.maxAttempts || data.max_fix_attempts || 50,
+                auto_deploy: shouldDeploy,
+                run_pipeline: data.run_pipeline !== false ? shouldRunPipeline : false,
+            })).data;
         } catch (error) {
-            console.error('Create pipeline error:', error);
-            return { pipeline_id: 'pipe-' + Date.now(), status: 'pending' };
+            return { success: false, error: error.response?.data?.error || error.message };
         }
     },
     trigger: async (pipelineId, params = {}) => {
         try {
-            const response = await api.post(`/pipelines/${pipelineId}/trigger`, params);
-            return response.data;
-        } catch (error) {
-            console.error('Trigger pipeline error:', error);
-            return { success: true };
-        }
+            const url = pipelineId.startsWith('http') ? pipelineId : params.repoUrl;
+            if (!url) return { success: false, error: 'No repo URL' };
+            return (await devopsApi.post('/api/devops/deploy', { repo_url: url })).data;
+        } catch (error) { return { success: false, error: error.message }; }
     },
-    getLogs: async (id, options = {}) => {
-        try {
-            const response = await api.get(`/pipelines/${id}/logs`, { params: options });
-            return response.data;
-        } catch (error) {
-            console.error('Get logs error:', error);
-            return [];
-        }
-    },
-    retry: async (id) => {
-        try {
-            const response = await api.post(`/pipelines/${id}/retry`);
-            return response.data;
-        } catch (error) {
-            return { success: true };
-        }
-    },
+    retry: async (id) => pipelineAPI.trigger(id),
     cancel: async (id) => {
-        try {
-            const response = await api.post(`/pipelines/${id}/cancel`);
-            return response.data;
-        } catch (error) {
-            return { success: true };
-        }
+        try { return (await devopsApi.post(`/api/devops/stop-deploy/${id}`)).data; }
+        catch (error) { return { success: false, error: error.message }; }
     },
     delete: async (id) => {
-        try {
-            const response = await api.delete(`/pipelines/${id}`);
-            return response.data;
-        } catch (error) {
-            return { success: true };
-        }
+        try { return (await devopsApi.post(`/api/devops/delete-deploy/${id}`)).data; }
+        catch (error) { return { success: false, error: error.message }; }
     },
+    getLogs: async () => [],
 };
 
 // ============================================
-// INFRASTRUCTURE API
+// INFRASTRUCTURE API (legacy)
 // ============================================
 export const infrastructureAPI = {
     getClusters: async () => {
-        try {
-            const response = await api.get('/infrastructure/clusters');
-            return response.data;
-        } catch (error) {
-            console.error('Get clusters error:', error);
-            return [];
-        }
+        try { return (await api.get('/infrastructure/clusters')).data; }
+        catch { return []; }
     },
     scaleCluster: async (data) => {
-        try {
-            const response = await api.post('/infrastructure/scale', data);
-            return response.data;
-        } catch (error) {
-            return { message: 'Scaled (mock)', status: 'scaling' };
-        }
+        try { return (await api.post('/infrastructure/scale', data)).data; }
+        catch { return { message: 'Scaled' }; }
     },
     getResources: async () => {
-        try {
-            const response = await api.get('/infrastructure/resources');
-            return response.data;
-        } catch (error) {
-            return { cpu: 45, memory: 62, disk: 34, network: 23 };
-        }
-    }
+        try { return (await api.get('/infrastructure/resources')).data; }
+        catch { return { cpu: 45, memory: 62, disk: 34 }; }
+    },
 };
 
 // ============================================
@@ -443,37 +286,147 @@ export const infrastructureAPI = {
 // ============================================
 export const monitoringAPI = {
     getMetrics: async (timeRange = '1h') => {
-        try {
-            const response = await api.get('/monitoring/metrics', { params: { timeRange } });
-            return response.data;
-        } catch (error) {
-            return { metrics: { uptime: '99.92%', requests: '12.4k', errors: 30, latency: '180ms' }, history: [] };
-        }
+        try { return (await devopsApi.get('/api/monitoring/metrics', { params: { timeRange } })).data; }
+        catch { return { success: false, metrics: {}, monitors: [] }; }
     },
     getAlerts: async (status = 'all') => {
-        try {
-            const response = await api.get('/monitoring/alerts', { params: { status } });
-            return response.data;
-        } catch (error) {
-            return [];
-        }
+        try { return (await devopsApi.get('/api/monitoring/alerts', { params: { status } })).data.alerts || []; }
+        catch { return []; }
     },
     acknowledgeAlert: async (alertId) => {
-        try {
-            const response = await api.post(`/monitoring/alerts/${alertId}/acknowledge`);
-            return response.data;
-        } catch (error) {
-            return { status: 'acknowledged' };
-        }
+        try { return (await devopsApi.post(`/api/monitoring/alerts/${alertId}/acknowledge`)).data; }
+        catch { return { status: 'acknowledged' }; }
     },
     getHealth: async () => {
-        try {
-            const response = await api.get('/monitoring/health');
-            return response.data;
-        } catch (error) {
-            return { status: 'healthy', services: 12, uptime: '99.9%' };
+        try { return (await devopsApi.get('/api/monitoring/health')).data; }
+        catch { return { status: 'healthy', services: { total: 0, healthy: 0 } }; }
+    },
+    getMonitors: async () => {
+        try { return (await devopsApi.get('/api/monitoring/monitors')).data.monitors || []; }
+        catch { return []; }
+    },
+    getMonitor: async (id) => {
+        try { return (await devopsApi.get(`/api/monitoring/monitors/${id}`)).data.monitor; }
+        catch { return null; }
+    },
+    stopMonitor: async (id) => {
+        try { return (await devopsApi.post(`/api/monitoring/monitors/${id}/stop`)).data; }
+        catch { return { success: false }; }
+    },
+    deleteMonitor: async (id) => {
+        try { return (await devopsApi.delete(`/api/monitoring/monitors/${id}`)).data; }
+        catch { return { success: false }; }
+    },
+    getInfrastructure: async () => {
+        try { return (await devopsApi.get('/api/monitoring/infrastructure')).data.infrastructure || { services: [] }; }
+        catch { return { services: [] }; }
+    },
+};
+
+// ============================================
+// 🏗️ INFRA API — Premium + Agentic AI
+// ============================================
+export const infraAPI = {
+    getUnified: async () => {
+        try { return (await devopsApi.get('/api/monitoring/infra/unified')).data; }
+        catch {
+            return {
+                success: false, services: [],
+                stats: { total_services: 0, total_replicas: 0, avg_cpu: 0, avg_memory: 0 },
+                health: { score: 100, status: 'excellent', details: {} },
+                high_performance: {}, agent: null,
+            };
         }
-    }
+    },
+    getNodes: async () => {
+        try { return (await devopsApi.get('/api/monitoring/infra/nodes')).data.nodes || []; }
+        catch { return []; }
+    },
+    getContainers: async () => {
+        try { return (await devopsApi.get('/api/monitoring/infra/containers')).data.containers || []; }
+        catch { return []; }
+    },
+    getMetrics: async () => {
+        try { return (await devopsApi.get('/api/monitoring/infra/metrics')).data.metrics || {}; }
+        catch { return {}; }
+    },
+    getInsights: async () => {
+        try { return (await devopsApi.get('/api/monitoring/infra/insights')).data.insights || []; }
+        catch { return []; }
+    },
+    applyInsight: async (insightId) => {
+        try { return (await devopsApi.post('/api/monitoring/infra/apply-insight', { insight_id: insightId })).data; }
+        catch (e) { return { success: false, error: e.message }; }
+    },
+    dismissInsight: async (insightId) => {
+        try { return (await devopsApi.post('/api/monitoring/infra/dismiss-insight', { insight_id: insightId })).data; }
+        catch { return { success: false }; }
+    },
+    getPredictions: async () => {
+        try { return (await devopsApi.get('/api/monitoring/infra/predictions')).data.predictions || []; }
+        catch { return []; }
+    },
+    getCostSavings: async () => {
+        try { return (await devopsApi.get('/api/monitoring/infra/cost-savings')).data.cost_savings || []; }
+        catch { return []; }
+    },
+    getActionLog: async () => {
+        try { return (await devopsApi.get('/api/monitoring/infra/action-log')).data.actions || []; }
+        catch { return []; }
+    },
+    getEvents: async () => {
+        try { return (await devopsApi.get('/api/monitoring/infra/events')).data.events || []; }
+        catch { return []; }
+    },
+    chat: async (message) => {
+        try { return (await devopsApi.post('/api/monitoring/infra/chat', { message })).data; }
+        catch (e) { return { success: false, error: e.message }; }
+    },
+    rootCause: async (service, error) => {
+        try { return (await devopsApi.post('/api/monitoring/infra/rca', { service, error })).data; }
+        catch { return { success: false }; }
+    },
+    getAutoScale: async (service = null) => {
+        try {
+            const params = service ? { service } : {};
+            return (await devopsApi.get('/api/monitoring/infra/auto-scale', { params })).data.rules || {};
+        } catch { return {}; }
+    },
+    setAutoScale: async (data) => {
+        try { return (await devopsApi.post('/api/monitoring/infra/auto-scale', data)).data; }
+        catch { return { success: false }; }
+    },
+
+    getAgentState: async () => {
+        try { return (await devopsApi.get('/api/monitoring/infra/agent/state')).data; }
+        catch {
+            return {
+                mode: 'off', running: false, total_decisions: 0, total_actions: 0,
+                success_rate: 0, confidence_threshold: 0.75, pending_count: 0,
+                tools_count: 0, safety: {},
+            };
+        }
+    },
+    setAgentMode: async (mode) => {
+        try { return (await devopsApi.post('/api/monitoring/infra/agent/mode', { mode })).data; }
+        catch { return { success: false }; }
+    },
+    setConfidenceThreshold: async (threshold) => {
+        try { return (await devopsApi.post('/api/monitoring/infra/agent/confidence', { threshold })).data; }
+        catch { return { success: false }; }
+    },
+    getDecisions: async (limit = 30) => {
+        try { return (await devopsApi.get('/api/monitoring/infra/agent/decisions', { params: { limit } })).data.decisions || []; }
+        catch { return []; }
+    },
+    executeDecision: async (decisionId) => {
+        try { return (await devopsApi.post('/api/monitoring/infra/agent/execute', { decision_id: decisionId })).data; }
+        catch { return { success: false }; }
+    },
+    getTools: async () => {
+        try { return (await devopsApi.get('/api/monitoring/infra/agent/tools')).data.tools || []; }
+        catch { return []; }
+    },
 };
 
 // ============================================
@@ -481,53 +434,29 @@ export const monitoringAPI = {
 // ============================================
 export const trainingAPI = {
     getModels: async () => {
-        try {
-            const response = await api.get('/training/models');
-            return response.data;
-        } catch (error) {
-            return [];
-        }
+        try { return (await api.get('/training/models')).data; }
+        catch { return []; }
     },
     startTraining: async (config) => {
-        try {
-            const response = await api.post('/training/train', config);
-            return response.data;
-        } catch (error) {
-            return { success: true, training_id: 'train-' + Date.now(), status: 'pending' };
-        }
+        try { return (await api.post('/training/train', config)).data; }
+        catch { return { success: true, training_id: 'train-' + Date.now() }; }
     },
     getStatus: async (trainingId) => {
-        try {
-            const response = await api.get(`/training/${trainingId}/status`);
-            return response.data;
-        } catch (error) {
-            return { training_id: trainingId, status: 'running', progress: 50 };
-        }
+        try { return (await api.get(`/training/${trainingId}/status`)).data; }
+        catch { return { status: 'running', progress: 50 }; }
     },
     stopTraining: async (id) => {
-        try {
-            const response = await api.post(`/training/${id}/stop`);
-            return response.data;
-        } catch (error) {
-            return { success: true };
-        }
+        try { return (await api.post(`/training/${id}/stop`)).data; }
+        catch { return { success: true }; }
     },
     deployModel: async (modelId) => {
-        try {
-            const response = await api.post('/training/deploy', { model_id: modelId });
-            return response.data;
-        } catch (error) {
-            return { success: true, status: 'deployed' };
-        }
+        try { return (await api.post('/training/deploy', { model_id: modelId })).data; }
+        catch { return { success: true }; }
     },
     getVersions: async () => {
-        try {
-            const response = await api.get('/training/versions');
-            return response.data;
-        } catch (error) {
-            return [];
-        }
-    }
+        try { return (await api.get('/training/versions')).data; }
+        catch { return []; }
+    },
 };
 
 // ============================================
@@ -535,229 +464,127 @@ export const trainingAPI = {
 // ============================================
 export const settingsAPI = {
     getSettings: async () => {
-        try {
-            const response = await api.get('/settings');
-            return response.data;
-        } catch (error) {
+        try { return (await api.get('/settings')).data; }
+        catch {
             return {
                 general: { language: 'en', timezone: 'UTC' },
                 appearance: { theme: 'dark' },
                 notifications: { emailNotifications: true },
                 security: { twoFactorAuth: false },
-                integrations: { github: { connected: false }, docker: { connected: false } }
+                integrations: {},
             };
         }
     },
     updateSettings: async (settings) => {
-        try {
-            const response = await api.put('/settings', settings);
-            return response.data;
-        } catch (error) {
-            return { success: true };
-        }
+        try { return (await api.put('/settings', settings)).data; }
+        catch { return { success: true }; }
     },
     getAuditLogs: async (limit = 50, offset = 0) => {
-        try {
-            const response = await api.get('/settings/audit-logs', { params: { limit, offset } });
-            return response.data;
-        } catch (error) {
-            return [];
-        }
+        try { return (await api.get('/settings/audit-logs', { params: { limit, offset } })).data; }
+        catch { return []; }
     },
     connectIntegration: async (provider, data) => {
-        try {
-            const response = await api.post(`/settings/integrations/${provider}`, data);
-            return response.data;
-        } catch (error) {
-            return { success: true, status: 'connected' };
-        }
+        try { return (await api.post(`/settings/integrations/${provider}`, data)).data; }
+        catch { return { success: true }; }
     },
     disconnectIntegration: async (provider) => {
-        try {
-            const response = await api.delete(`/settings/integrations/${provider}`);
-            return response.data;
-        } catch (error) {
-            return { success: true, status: 'disconnected' };
-        }
-    }
+        try { return (await api.delete(`/settings/integrations/${provider}`)).data; }
+        catch { return { success: true }; }
+    },
 };
 
 // ============================================
-// 🆕 DEPLOY API - Agentic DevOps
+// ACTION API
+// ============================================
+export const actionAPI = {
+    getAll: async (type = null, status = null) => {
+        try {
+            const params = {};
+            if (type) params.type = type;
+            if (status) params.status = status;
+            return (await devopsApi.get('/api/devops/actions', { params })).data.actions || [];
+        } catch { return []; }
+    },
+    getOne: async (actionId) => {
+        try { return (await devopsApi.get(`/api/devops/actions/${actionId}`)).data.action; }
+        catch { return null; }
+    },
+    delete: async (actionId) => {
+        try { return (await devopsApi.delete(`/api/devops/actions/${actionId}`)).data; }
+        catch { return { success: false }; }
+    },
+    monitor: async (payload) => {
+        try { return (await devopsApi.post('/api/devops/action/monitor', payload)).data; }
+        catch (error) { return { success: false, error: error.message }; }
+    },
+    scale: async (payload) => {
+        try { return (await devopsApi.post('/api/devops/action/scale', payload)).data; }
+        catch (error) { return { success: false, error: error.message }; }
+    },
+    security: async (payload) => {
+        try { return (await devopsApi.post('/api/devops/action/security', payload)).data; }
+        catch (error) { return { success: false, error: error.message }; }
+    },
+    fixCode: async (payload) => {
+        try { return (await devopsApi.post('/api/devops/action/fix-code', payload)).data; }
+        catch (error) { return { success: false, error: error.message }; }
+    },
+};
+
+// ============================================
+// DEPLOY API
 // ============================================
 export const deployAPI = {
-    buildImage: async (payload) => {
+    deploy: async (payload) => {
         try {
-            const response = await api.post('/deploy/build', payload);
-            return response.data;
-        } catch (error) {
-            console.error('Build image error:', error);
-            return {
-                success: true,
-                buildId: 'build-' + Date.now(),
-                method: payload.provider || 'kaniko',
-                message: 'Build queued (mock)',
-                image: `registry.local/${payload.projectId}:latest`,
-            };
-        }
+            return (await devopsApi.post('/api/devops/deploy', {
+                repo_url: payload.repoUrl || payload.repo_url,
+                deploy_type: payload.deployType || 'auto',
+                provider: payload.provider || 'self-host',
+                user_id: payload.user_id || 'demo_user',
+                project_id: payload.project_id || 'default',
+                project_name: payload.project_name || 'Unknown',
+            })).data;
+        } catch (error) { return { success: false, error: error.message }; }
     },
-
-    deployFrontend: async (payload) => {
-        try {
-            const response = await api.post('/deploy/frontend', payload);
-            return response.data;
-        } catch (error) {
-            console.error('Deploy frontend error:', error);
-            const liveUrl = `https://${payload.projectId}-${Date.now().toString(36)}.vercel.app`;
-            return { success: true, deployId: 'fe-' + Date.now(), liveUrl, type: 'frontend' };
-        }
+    listDeployments: async () => {
+        try { return (await devopsApi.get('/api/devops/deployments')).data; }
+        catch { return { success: false, deployments: {} }; }
     },
-
-    deployBackend: async (payload) => {
-        try {
-            const response = await api.post('/deploy/backend', payload);
-            return response.data;
-        } catch (error) {
-            console.error('Deploy backend error:', error);
-            const liveUrl = `https://${payload.projectId}-api.onrender.com`;
-            return { success: true, deployId: 'be-' + Date.now(), liveUrl, type: 'backend' };
-        }
+    stop: async (deployId) => {
+        try { return (await devopsApi.post(`/api/devops/stop-deploy/${deployId}`)).data; }
+        catch { return { success: false }; }
     },
-
-    deployFullStack: async (payload) => {
-        try {
-            const response = await api.post('/deploy/fullstack', payload);
-            return response.data;
-        } catch (error) {
-            console.error('Deploy fullstack error:', error);
-            const liveUrl = `https://${payload.projectId}-${Date.now().toString(36)}.agentic.app`;
-            return {
-                success: true, deployId: 'fs-' + Date.now(), liveUrl,
-                frontendUrl: liveUrl, backendUrl: `${liveUrl}/api`, type: 'fullstack'
-            };
-        }
-    },
-
-    getLiveUrl: async (deployId) => {
-        try {
-            const response = await api.get(`/deploy/${deployId}/url`);
-            return response.data;
-        } catch (error) {
-            return { liveUrl: `https://${deployId}.agentic.app` };
-        }
-    },
-
-    getStatus: async (deployId) => {
-        try {
-            const response = await api.get(`/deploy/${deployId}/status`);
-            return response.data;
-        } catch (error) {
-            return { status: 'running', progress: 50 };
-        }
+    delete: async (deployId) => {
+        try { return (await devopsApi.post(`/api/devops/delete-deploy/${deployId}`)).data; }
+        catch { return { success: false }; }
     },
 };
 
 // ============================================
-// 🆕 CI/CD PIPELINE API
-// ============================================
-export const cicdAPI = {
-    createPipeline: async (payload) => {
-        try {
-            const response = await api.post('/cicd/pipeline', payload);
-            return response.data;
-        } catch (error) {
-            console.error('Create pipeline error:', error);
-            return {
-                success: true,
-                pipelineId: 'pipe-' + Date.now(),
-                name: payload.name || 'New Pipeline',
-                yaml: `name: CI/CD\non:\n  push:\n    branches: [main]\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v3\n      - run: npm ci && npm run build`,
-            };
-        }
-    },
-    runPipeline: async (pipelineId) => {
-        try {
-            const response = await api.post(`/cicd/pipeline/${pipelineId}/run`);
-            return response.data;
-        } catch (error) {
-            return { success: true, runId: 'run-' + Date.now(), status: 'running' };
-        }
-    },
-    getPipelineStatus: async (pipelineId) => {
-        try {
-            const response = await api.get(`/cicd/pipeline/${pipelineId}`);
-            return response.data;
-        } catch (error) {
-            return { pipelineId, status: 'running', progress: 60, steps: [] };
-        }
-    },
-};
-
-// ============================================
-// 🆕 GITHUB API - Auto-fix & PRs
+// GITHUB API
 // ============================================
 export const githubAPI = {
     connect: async (payload) => {
-        try {
-            const response = await api.post('/github/connect', payload);
-            return response.data;
-        } catch (error) {
-            return { success: true, connected: true, user: payload.username || 'demo' };
-        }
+        try { return (await api.post('/github/connect', payload)).data; }
+        catch { return { success: true }; }
     },
     listRepos: async () => {
-        try {
-            const response = await api.get('/github/repos');
-            return response.data;
-        } catch (error) {
-            return [
-                { fullName: 'user/demo-project', name: 'demo-project', private: false, language: 'JavaScript' },
-                { fullName: 'user/api-service', name: 'api-service', private: true, language: 'TypeScript' },
-            ];
-        }
+        try { return (await api.get('/github/repos')).data; }
+        catch { return []; }
     },
     analyzeRepo: async (repoFullName) => {
-        try {
-            const response = await api.post(`/github/analyze/${repoFullName}`);
-            return response.data;
-        } catch (error) {
-            return {
-                repo: repoFullName,
-                healthScore: 78,
-                issues: [
-                    { file: 'src/index.js', line: 12, severity: 'error', message: 'Missing semicolon' },
-                ],
-                fixesAvailable: 1,
-            };
-        }
+        try { return (await api.post(`/github/analyze/${repoFullName}`)).data; }
+        catch { return { healthScore: 78 }; }
     },
     autoFix: async (payload) => {
-        try {
-            const response = await api.post('/github/autofix', payload);
-            return response.data;
-        } catch (error) {
-            return {
-                success: true,
-                fixesApplied: 2,
-                files: [
-                    { file: 'src/index.js', fix: 'Added missing semicolon' },
-                ],
-            };
-        }
+        try { return (await api.post('/github/autofix', payload)).data; }
+        catch { return { success: true }; }
     },
     createPR: async (payload) => {
-        try {
-            const response = await api.post('/github/pr', payload);
-            return response.data;
-        } catch (error) {
-            return {
-                success: true,
-                prUrl: `https://github.com/${payload.repo}/pull/${Math.floor(Math.random() * 1000)}`,
-                prNumber: Math.floor(Math.random() * 1000),
-            };
-        }
+        try { return (await api.post('/github/pr', payload)).data; }
+        catch { return { success: true }; }
     },
 };
 
-// Default export for backward compatibility
 export default api;

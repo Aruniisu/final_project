@@ -1,0 +1,743 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import {
+  FiServer, FiRefreshCw, FiCpu, FiHardDrive, FiActivity,
+  FiUsers, FiZap, FiSend, FiAlertCircle, FiCheckCircle,
+  FiTrendingUp, FiXCircle, FiInfo, FiClock, FiWifi,
+  FiBarChart2, FiLayers, FiChevronRight, FiDollarSign,
+  FiAlertTriangle, FiTarget,
+} from 'react-icons/fi';
+import { FaRobot, FaMagic } from 'react-icons/fa';
+import toast from 'react-hot-toast';
+import { infraAPI } from '../../api/assistant';
+import '../../styles/main.css';
+import './InfraManager.css';
+
+// ============================================
+// HEALTH SCORE CARD
+// ============================================
+const HealthScoreCard = ({ health }) => {
+  if (!health) return null;
+
+  const scoreColor = {
+    excellent: '#10b981',
+    good: '#3b82f6',
+    warning: '#f59e0b',
+    critical: '#ef4444',
+  }[health.status] || '#3b82f6';
+
+  const circumference = 2 * Math.PI * 42;
+  const offset = circumference - ((health.score || 0) / 100) * circumference;
+
+  return (
+    <div className="health-score-card">
+      <div className="health-circle">
+        <svg width="120" height="120" viewBox="0 0 120 120">
+          <circle cx="60" cy="60" r="42" fill="none"
+            stroke="rgba(148, 163, 184, 0.15)" strokeWidth="8" />
+          <circle cx="60" cy="60" r="42" fill="none"
+            stroke={scoreColor} strokeWidth="8" strokeLinecap="round"
+            strokeDasharray={circumference} strokeDashoffset={offset}
+            transform="rotate(-90 60 60)"
+            style={{ transition: 'stroke-dashoffset 1s ease' }} />
+        </svg>
+        <div className="health-center">
+          <div className="health-value" style={{ color: scoreColor }}>
+            {health.score || 0}
+          </div>
+          <div className="health-label">/ 100</div>
+        </div>
+      </div>
+      <div className="health-info">
+        <div className="health-status" style={{ color: scoreColor }}>
+          {(health.status || 'excellent').toUpperCase()}
+        </div>
+        <div className="health-details">
+          <div>CPU: {health.details?.avg_cpu || 0}%</div>
+          <div>Mem: {health.details?.avg_memory || 0}%</div>
+          <div>{health.details?.total_services || 0} services</div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ============================================
+// HIGH-PERFORMANCE METRICS
+// ============================================
+const HighPerfMetrics = ({ metrics }) => {
+  if (!metrics) return null;
+
+  const items = [
+    { label: 'Throughput', value: `${metrics.requests_per_sec || 0}/s`, icon: FiActivity, color: '#3b82f6' },
+    { label: 'Net In', value: `${metrics.network_in_mbps || 0} Mbps`, icon: FiWifi, color: '#10b981' },
+    { label: 'Net Out', value: `${metrics.network_out_mbps || 0} Mbps`, icon: FiWifi, color: '#8b5cf6' },
+    { label: 'P95 Latency', value: `${metrics.p95_latency_ms || 0}ms`, icon: FiClock, color: '#f59e0b' },
+    { label: 'P99 Latency', value: `${metrics.p99_latency_ms || 0}ms`, icon: FiClock, color: '#ef4444' },
+    { label: 'Error Rate', value: `${metrics.error_rate_pct || 0}%`, icon: FiAlertTriangle, color: '#ef4444' },
+    { label: 'Cache Hit', value: `${metrics.cache_hit_pct || 0}%`, icon: FiTarget, color: '#10b981' },
+  ];
+
+  return (
+    <div className="high-perf-panel">
+      <div className="panel-header-custom">
+        <h3><FiZap /> High-Performance Metrics</h3>
+        <span className="live-badge">● Live</span>
+      </div>
+      <div className="high-perf-grid">
+        {items.map((item, i) => {
+          const Icon = item.icon;
+          return (
+            <motion.div
+              key={i}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: i * 0.03 }}
+              className="high-perf-item"
+              style={{ '--item-color': item.color }}
+            >
+              <Icon className="high-perf-icon" />
+              <div className="high-perf-content">
+                <div className="high-perf-label">{item.label}</div>
+                <div className="high-perf-value">{item.value}</div>
+              </div>
+            </motion.div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+// ============================================
+// SERVICE CARD
+// ============================================
+const ServiceCard = ({ service, onSelect }) => {
+  const cpu = service.cpu_percent || 0;
+  const mem = service.memory_percent || 0;
+  const getColor = (v) => v < 50 ? 'good' : v < 80 ? 'warn' : 'bad';
+
+  const sourceLabel = {
+    'deploy': '🚀 Deployed',
+    'deploy+scaled': '⚡ Deployed + Scaled',
+    'scaled': '📈 Scaled',
+    'monitor': '📊 Monitored',
+  }[service.source] || '—';
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="service-card"
+      onClick={() => onSelect(service)}
+    >
+      <div className="service-header">
+        <div className="service-info">
+          <div className="service-name">
+            <FiServer /> {service.display_name || service.service_name}
+          </div>
+          <div className="service-repo">
+            {service.live_url ? (
+              <a href={service.live_url} target="_blank" rel="noopener noreferrer">
+                {service.live_url.substring(0, 40)}
+              </a>
+            ) : service.repo_url ? (
+              service.repo_url.substring(0, 40)
+            ) : '—'}
+          </div>
+        </div>
+        <div className="service-badges">
+          <span className="source-badge">{sourceLabel}</span>
+          <span className={`status-badge ${service.status}`}>
+            <FiActivity /> {service.status}
+          </span>
+        </div>
+      </div>
+
+      {service.source !== 'monitor' && (
+        <div className="service-metrics">
+          <div className="metric-bar">
+            <div className="metric-header">
+              <span><FiCpu /> CPU</span>
+              <span className={`metric-value ${getColor(cpu)}`}>{cpu}%</span>
+            </div>
+            <div className="bar-track">
+              <div className={`bar-fill ${getColor(cpu)}`} style={{ width: `${cpu}%` }} />
+            </div>
+          </div>
+          <div className="metric-bar">
+            <div className="metric-header">
+              <span><FiHardDrive /> Memory</span>
+              <span className={`metric-value ${getColor(mem)}`}>{mem}%</span>
+            </div>
+            <div className="bar-track">
+              <div className={`bar-fill ${getColor(mem)}`} style={{ width: `${mem}%` }} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {service.source === 'monitor' && (
+        <div className="monitor-info">
+          <div className="monitor-stat">
+            <span className="label">Uptime</span>
+            <span className={`value ${service.uptime_percent >= 99 ? 'good' : 'warn'}`}>
+              {service.uptime_percent?.toFixed(2) || 0}%
+            </span>
+          </div>
+          <div className="monitor-stat">
+            <span className="label">Latency</span>
+            <span className="value">{service.avg_latency_ms || 0}ms</span>
+          </div>
+        </div>
+      )}
+
+      <div className="service-footer">
+        <div className="service-stat">
+          <FiUsers />
+          <span className="value">{service.replicas || 1} replicas</span>
+        </div>
+        <div className="service-stat">
+          <FiActivity />
+          <span className="value">{service.requests_per_sec || 0} req/s</span>
+        </div>
+        <FiChevronRight className="service-chevron" />
+      </div>
+    </motion.div>
+  );
+};
+
+// ============================================
+// SERVICE DRAWER
+// ============================================
+const ServiceDrawer = ({ service, onClose }) => {
+  if (!service) return null;
+
+  return (
+    <motion.div
+      initial={{ x: '100%' }}
+      animate={{ x: 0 }}
+      exit={{ x: '100%' }}
+      transition={{ type: 'tween', duration: 0.3 }}
+      className="service-drawer"
+    >
+      <div className="drawer-header">
+        <div>
+          <h3><FiServer /> {service.display_name || service.service_name}</h3>
+          <p>{service.repo_url || service.live_url || 'No URL'}</p>
+        </div>
+        <button onClick={onClose}><FiXCircle /></button>
+      </div>
+
+      <div className="drawer-body">
+        <div className="drawer-section">
+          <h4>Metrics</h4>
+          <div className="drawer-stats">
+            <div><span>CPU</span><b>{service.cpu_percent || 0}%</b></div>
+            <div><span>Memory</span><b>{service.memory_percent || 0}%</b></div>
+            <div><span>Disk</span><b>{service.disk_percent || 0}%</b></div>
+            <div><span>Requests/s</span><b>{service.requests_per_sec || 0}</b></div>
+            <div><span>Replicas</span><b>{service.replicas || 1}</b></div>
+            <div><span>Old Replicas</span><b>{service.old_replicas || 1}</b></div>
+          </div>
+        </div>
+
+        {service.last_scaled_at && (
+          <div className="drawer-section">
+            <h4>Last Scaled</h4>
+            <p>{new Date(service.last_scaled_at * 1000).toLocaleString()}</p>
+          </div>
+        )}
+
+        {service.replica_metrics?.length > 0 && (
+          <div className="drawer-section">
+            <h4>Replicas ({service.replica_metrics.length})</h4>
+            <div className="replicas-list">
+              {service.replica_metrics.map((r, i) => (
+                <div key={i} className="replica-item">
+                  <b>{r.id}</b>
+                  <span>CPU {r.cpu}% · Mem {r.memory}%</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {service.live_url && (
+          <div className="drawer-section">
+            <h4>Live URL</h4>
+            <a href={service.live_url} target="_blank" rel="noopener noreferrer" className="drawer-link">
+              {service.live_url}
+            </a>
+          </div>
+        )}
+      </div>
+    </motion.div>
+  );
+};
+
+// ============================================
+// MAIN
+// ============================================
+const InfraManager = () => {
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [showAI, setShowAI] = useState(true);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [selectedService, setSelectedService] = useState(null);
+
+  const [services, setServices] = useState([]);
+  const [stats, setStats] = useState({
+    total_services: 0, total_replicas: 0,
+    avg_cpu: 0, avg_memory: 0,
+    total_deployments: 0, total_monitors: 0,
+  });
+  const [health, setHealth] = useState({ score: 100, status: 'excellent', details: {} });
+  const [highPerf, setHighPerf] = useState({});
+  const [insights, setInsights] = useState([]);
+  const [predictions, setPredictions] = useState([]);
+  const [costSavings, setCostSavings] = useState([]);
+  const [actionLog, setActionLog] = useState([]);
+
+  const [chatMessages, setChatMessages] = useState([
+    {
+      role: 'assistant',
+      content: "👋 Hi! I'm your Infrastructure AI. Ask me anything about scaling, performance, or costs.",
+      timestamp: new Date().toLocaleTimeString(),
+    },
+  ]);
+  const [chatInput, setChatInput] = useState('');
+  const [chatLoading, setChatLoading] = useState(false);
+  const chatEndRef = useRef(null);
+
+  // Fetch all
+  const fetchAll = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
+    try {
+      const [unified, insightsData, predictionsData, costData, actionData] = await Promise.all([
+        infraAPI.getUnified(),
+        infraAPI.getInsights(),
+        infraAPI.getPredictions(),
+        infraAPI.getCostSavings(),
+        infraAPI.getActionLog(),
+      ]);
+
+      if (unified?.success !== false) {
+        setServices(unified.services || []);
+        setStats(unified.stats || {});
+        setHealth(unified.health || { score: 100, status: 'excellent', details: {} });
+        setHighPerf(unified.high_performance || {});
+      }
+
+      setInsights(insightsData || []);
+      setPredictions(predictionsData || []);
+      setCostSavings(costData || []);
+      setActionLog(actionData || []);
+    } catch (err) {
+      console.error('Infra fetch error:', err);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchAll();
+    const interval = setInterval(() => fetchAll(true), 5000);
+    return () => clearInterval(interval);
+  }, [fetchAll]);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatMessages]);
+
+  const handleApplyInsight = async (insightId) => {
+    toast.loading('Applying AI recommendation...', { id: 'apply' });
+    const res = await infraAPI.applyInsight(insightId);
+    if (res.success) {
+      toast.success('✅ Applied!', { id: 'apply' });
+      fetchAll(true);
+    } else {
+      toast.error(res.error || 'Failed', { id: 'apply' });
+    }
+  };
+
+  const handleDismissInsight = async (insightId) => {
+    const res = await infraAPI.dismissInsight(insightId);
+    if (res.success) {
+      setInsights(prev => prev.filter(i => i.id !== insightId));
+    }
+  };
+
+  const handleRefresh = () => {
+    setRefreshing(true);
+    fetchAll(true);
+    toast.success('Refreshed');
+  };
+
+  const handleChatSend = async () => {
+    const msg = chatInput.trim();
+    if (!msg || chatLoading) return;
+
+    setChatMessages(prev => [...prev, {
+      role: 'user', content: msg,
+      timestamp: new Date().toLocaleTimeString(),
+    }]);
+    setChatInput('');
+    setChatLoading(true);
+
+    const res = await infraAPI.chat(msg);
+
+    if (res.success) {
+      setChatMessages(prev => [...prev, {
+        role: 'assistant',
+        content: res.message,
+        timestamp: new Date().toLocaleTimeString(),
+      }]);
+    } else {
+      setChatMessages(prev => [...prev, {
+        role: 'assistant',
+        content: `⚠️ ${res.error || 'Error'}`,
+        timestamp: new Date().toLocaleTimeString(),
+      }]);
+    }
+    setChatLoading(false);
+  };
+
+  const handleKeyPress = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleChatSend();
+    }
+  };
+
+  if (loading && services.length === 0) {
+    return (
+      <div className="infra-page-loading">
+        <div className="loading-spinner" />
+        <p>Loading infrastructure...</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="infra-page">
+      {/* Header */}
+      <div className="infra-header">
+        <div>
+          <h1 className="infra-title">Infrastructure</h1>
+          <p className="infra-subtitle">
+            AI-powered unified view — deployments, pipelines, monitoring
+          </p>
+        </div>
+        <div className="infra-header-actions">
+          <button
+            className={`ai-toggle ${showAI ? 'active' : ''}`}
+            onClick={() => setShowAI(!showAI)}
+          >
+            <FaRobot /> AI {showAI ? 'ON' : 'OFF'}
+          </button>
+          <button
+            className="refresh-btn"
+            onClick={handleRefresh}
+            disabled={refreshing}
+          >
+            <FiRefreshCw className={refreshing ? 'spin' : ''} /> Refresh
+          </button>
+        </div>
+      </div>
+
+      {/* Top row */}
+      <div className="infra-top-grid">
+        <HealthScoreCard health={health} />
+        <div className="stats-grid">
+          <div className="stat-card" style={{ '--stat-color': '#a855f7' }}>
+            <div className="stat-card-header">
+              <span className="stat-label">Services</span>
+              <div className="stat-icon"><FiServer /></div>
+            </div>
+            <div className="stat-value">{stats.total_services || 0}</div>
+            <div className="stat-sub">
+              {stats.total_deployments || 0} deploys · {stats.total_monitors || 0} monitors
+            </div>
+          </div>
+
+          <div className="stat-card" style={{ '--stat-color': '#10b981' }}>
+            <div className="stat-card-header">
+              <span className="stat-label">Replicas</span>
+              <div className="stat-icon"><FiUsers /></div>
+            </div>
+            <div className="stat-value">{stats.total_replicas || 0}</div>
+            <div className="stat-sub">Total instances</div>
+          </div>
+
+          <div className="stat-card" style={{ '--stat-color': '#3b82f6' }}>
+            <div className="stat-card-header">
+              <span className="stat-label">Avg CPU</span>
+              <div className="stat-icon"><FiCpu /></div>
+            </div>
+            <div className="stat-value">{stats.avg_cpu || 0}%</div>
+            <div className="stat-sub">Across services</div>
+          </div>
+
+          <div className="stat-card" style={{ '--stat-color': '#f59e0b' }}>
+            <div className="stat-card-header">
+              <span className="stat-label">Avg Memory</span>
+              <div className="stat-icon"><FiHardDrive /></div>
+            </div>
+            <div className="stat-value">{stats.avg_memory || 0}%</div>
+            <div className="stat-sub">Across services</div>
+          </div>
+        </div>
+      </div>
+
+      {/* High-perf metrics */}
+      <HighPerfMetrics metrics={highPerf} />
+
+      {/* AI Insights */}
+      <AnimatePresence>
+        {showAI && insights.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, height: 0 }}
+            className="ai-panel"
+          >
+            <div className="ai-panel-header">
+              <div className="ai-panel-title">
+                <FaMagic /> AI Insights
+                <span className="ai-badge">{insights.length}</span>
+              </div>
+              <span className="live-badge">● Live</span>
+            </div>
+            <div className="ai-insights-list">
+              {insights.map((insight) => (
+                <motion.div
+                  key={insight.id}
+                  initial={{ opacity: 0, x: -10 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  className={`ai-insight-item ${insight.severity}`}
+                >
+                  <div className="ai-insight-icon">
+                    {insight.severity === 'critical' && <FiAlertCircle />}
+                    {insight.severity === 'warning' && <FiTrendingUp />}
+                    {insight.severity === 'info' && <FiInfo />}
+                  </div>
+                  <div className="ai-insight-body">
+                    <div className="ai-insight-title">{insight.title}</div>
+                    <div className="ai-insight-message">{insight.message}</div>
+                  </div>
+                  <div className="ai-insight-actions">
+                    {insight.action === 'scale' && (
+                      <button
+                        className="btn-apply"
+                        onClick={() => handleApplyInsight(insight.id)}
+                      >
+                        <FiZap /> Apply
+                      </button>
+                    )}
+                    <button
+                      className="btn-dismiss"
+                      onClick={() => handleDismissInsight(insight.id)}
+                    >
+                      <FiXCircle />
+                    </button>
+                  </div>
+                </motion.div>
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Predictions + Cost */}
+      <div className="ai-two-col">
+        {showAI && predictions.length > 0 && (
+          <div className="ai-pred-panel">
+            <div className="panel-header-custom">
+              <h3><FiTrendingUp /> AI Predictions</h3>
+              <span className="live-badge">30 min</span>
+            </div>
+            <div className="pred-list">
+              {predictions.map((p) => (
+                <div key={p.id} className={`pred-item ${p.severity}`}>
+                  <FiAlertCircle />
+                  <div>
+                    <div className="pred-service">{p.service}</div>
+                    <div className="pred-text">{p.prediction}</div>
+                    <div className="pred-time">{p.timeframe}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {showAI && costSavings.length > 0 && (
+          <div className="ai-cost-panel">
+            <div className="panel-header-custom">
+              <h3><FiDollarSign /> AI Cost Optimizer</h3>
+            </div>
+            <div className="cost-list">
+              {costSavings.map((c) => (
+                <div key={c.id} className="cost-item">
+                  <FiDollarSign className="cost-icon" />
+                  <div className="cost-body">
+                    <div className="cost-service">{c.service}</div>
+                    <div className="cost-text">{c.suggestion}</div>
+                    <div className="cost-savings">{c.estimated_savings}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Services */}
+      <div className="services-panel">
+        <div className="panel-header-custom">
+          <h3><FiLayers /> Services ({services.length})</h3>
+          <span className="services-hint">Click for details</span>
+        </div>
+
+        {services.length === 0 ? (
+          <div className="empty-state">
+            <FiServer size={40} />
+            <h4>No services yet</h4>
+            <p>Deploy a project or start monitoring to see it here</p>
+          </div>
+        ) : (
+          <div className="services-list">
+            {services.map((svc, idx) => (
+              <ServiceCard
+                key={`${svc.service_name}-${idx}`}
+                service={svc}
+                onSelect={setSelectedService}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Action Log */}
+      {actionLog.length > 0 && (
+        <div className="action-log-panel">
+          <div className="panel-header-custom">
+            <h3><FiClock /> AI Action Log</h3>
+          </div>
+          <div className="action-list">
+            {actionLog.slice(0, 8).map((a, i) => (
+              <div key={i} className="action-item">
+                <span className={`action-dot ${a.reason?.includes('auto') ? 'auto' : 'manual'}`} />
+                <div className="action-content">
+                  <span className="action-text">
+                    Scaled <b>{a.service}</b> {a.from} → {a.to} replicas
+                  </span>
+                  <span className={`action-reason ${a.reason?.includes('auto') ? 'auto' : 'manual'}`}>
+                    {a.reason?.includes('auto') ? 'AUTO' : 'MANUAL'}
+                  </span>
+                </div>
+                <span className="action-time">
+                  {new Date(a.timestamp * 1000).toLocaleTimeString()}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Drawer */}
+      <AnimatePresence>
+        {selectedService && (
+          <>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="drawer-overlay"
+              onClick={() => setSelectedService(null)}
+            />
+            <ServiceDrawer
+              service={selectedService}
+              onClose={() => setSelectedService(null)}
+            />
+          </>
+        )}
+      </AnimatePresence>
+
+      {/* Chat FAB */}
+      <button
+        className="chat-fab"
+        onClick={() => setChatOpen(!chatOpen)}
+        title="Ask AI"
+      >
+        <FaRobot />
+      </button>
+
+      {/* Chat Panel */}
+      <AnimatePresence>
+        {chatOpen && (
+          <motion.div
+            initial={{ opacity: 0, y: 20, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 20, scale: 0.95 }}
+            className="chat-panel"
+          >
+            <div className="chat-panel-header">
+              <div className="chat-title">
+                <FaRobot /> Infra AI Assistant
+              </div>
+              <button className="chat-close" onClick={() => setChatOpen(false)}>
+                <FiXCircle />
+              </button>
+            </div>
+
+            <div className="chat-messages">
+              {chatMessages.map((msg, i) => (
+                <div key={i} className={`chat-msg ${msg.role}`}>
+                  <div className="chat-bubble">{msg.content}</div>
+                  <div className="chat-time">{msg.timestamp}</div>
+                </div>
+              ))}
+              {chatLoading && (
+                <div className="chat-msg assistant">
+                  <div className="chat-bubble thinking">
+                    <span className="dots"><span /><span /><span /></span>
+                  </div>
+                </div>
+              )}
+              <div ref={chatEndRef} />
+            </div>
+
+            <div className="chat-input-area">
+              <input
+                type="text"
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={handleKeyPress}
+                placeholder="Ask about scaling, performance..."
+                disabled={chatLoading}
+              />
+              <button
+                onClick={handleChatSend}
+                disabled={!chatInput.trim() || chatLoading}
+              >
+                <FiSend />
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Footer */}
+      <div className="infra-footer">
+        <span>● Auto-refresh: 5s</span>
+        <span>AI Insights: {insights.length}</span>
+        <span>{new Date().toLocaleTimeString()}</span>
+      </div>
+    </div>
+  );
+};
+
+export default InfraManager;

@@ -1,0 +1,300 @@
+"""
+MultiProviderDeployService — Vercel / Netlify / Render
+========================================================
+Deploy to external providers ONLY when user explicitly requests.
+Default deploy method = Self-Host.
+
+Supported providers: vercel, netlify, render
+"""
+
+import os
+import re
+import time
+import json
+import requests
+from typing import Dict, Any, Optional
+
+
+class MultiProviderDeployService:
+    """Deploy to external providers when user requests."""
+
+    def __init__(self, agent=None):
+        self.agent = agent
+        self.vercel_token = os.getenv('VERCEL_TOKEN')
+        self.netlify_token = os.getenv('NETLIFY_TOKEN')
+        self.render_api_key = os.getenv('RENDER_API_KEY')
+        self.render_owner_id = os.getenv('RENDER_OWNER_ID')
+
+    def deploy(
+        self,
+        provider: str,
+        owner: str,
+        repo: str,
+        repo_url: str,
+        default_branch: str,
+        stack_info: Dict,
+        sid: Optional[str] = None,
+        on_log=None,
+    ) -> Dict:
+        """Deploy via specified provider."""
+        def log(msg, level='info'):
+            print(f"[{provider.upper()}] {msg}")
+            if on_log:
+                on_log(msg, level)
+
+        log("=" * 60)
+        log(f"🚀 {provider.upper()} Deploy: {owner}/{repo}")
+        log("=" * 60)
+
+        # Detect structure
+        detection = self._detect_deploy_targets(owner, repo, default_branch, stack_info, log)
+
+        if provider == 'vercel':
+            return self._deploy_vercel(owner, repo, default_branch, detection, log)
+        elif provider == 'netlify':
+            return self._deploy_netlify(owner, repo, default_branch, detection, log)
+        elif provider == 'render':
+            return self._deploy_render(owner, repo, default_branch, detection, log)
+        else:
+            return {'success': False, 'error': f'Unknown provider: {provider}'}
+
+    def _detect_deploy_targets(self, owner, repo, branch, stack_info, log):
+        """Detect whether we have frontend only / backend only / fullstack."""
+        result = {
+            'has_frontend': False,
+            'has_backend': False,
+            'frontend_dir': None,
+            'backend_dir': None,
+            'backend_lang': None,
+            'framework': stack_info.get('framework', 'unknown'),
+        }
+
+        try:
+            token = os.getenv('GITHUB_TOKEN')
+            headers = {'Authorization': f'token {token}', 'Accept': 'application/vnd.github+json'}
+
+            # Check root
+            r = requests.get(
+                f'https://api.github.com/repos/{owner}/{repo}/contents?ref={branch}',
+                headers=headers, timeout=15,
+            )
+            if r.status_code != 200:
+                return result
+
+            items = {item['name'] for item in r.json()}
+
+            # Frontend detection
+            if 'frontend' in items or 'client' in items:
+                result['has_frontend'] = True
+                result['frontend_dir'] = 'frontend' if 'frontend' in items else 'client'
+            elif 'package.json' in items:
+                result['has_frontend'] = True
+                result['frontend_dir'] = '.'
+
+            # Backend detection
+            for backend_name in ['backend', 'server', 'api']:
+                if backend_name in items:
+                    result['has_backend'] = True
+                    result['backend_dir'] = backend_name
+                    break
+
+            # Backend language
+            for lang, marker in [('python', 'requirements.txt'), ('node', 'package.json'),
+                                  ('go', 'go.mod'), ('php', 'composer.json')]:
+                if marker in items:
+                    result['backend_lang'] = lang
+                    break
+
+        except Exception as e:
+            log(f"   ⚠️ Detect error: {str(e)[:100]}")
+
+        return result
+
+    # ============================================
+    # Vercel
+    # ============================================
+    def _deploy_vercel(self, owner, repo, branch, detection, log):
+        if not self.vercel_token:
+            return {'success': False, 'error': 'VERCEL_TOKEN not set'}
+
+        log("   📦 Creating Vercel project...")
+        project_name = re.sub(r'[^a-z0-9._\-]', '-', repo.lower())[:100]
+
+        try:
+            # Get repo ID
+            gh_token = os.getenv('GITHUB_TOKEN')
+            r = requests.get(
+                f'https://api.github.com/repos/{owner}/{repo}',
+                headers={'Authorization': f'token {gh_token}'}, timeout=15,
+            )
+            repo_id = r.json().get('id') if r.status_code == 200 else None
+
+            # Create project
+            body = {'name': project_name}
+            if detection.get('frontend_dir') and detection['frontend_dir'] != '.':
+                body['rootDirectory'] = detection['frontend_dir']
+
+            r = requests.post(
+                'https://api.vercel.com/v10/projects',
+                headers={'Authorization': f'Bearer {self.vercel_token}', 'Content-Type': 'application/json'},
+                json=body, timeout=20,
+            )
+            if r.status_code == 409:
+                r = requests.get(
+                    f'https://api.vercel.com/v9/projects/{project_name}',
+                    headers={'Authorization': f'Bearer {self.vercel_token}'}, timeout=15,
+                )
+            if r.status_code not in (200, 201):
+                return {'success': False, 'error': f'Project: {r.text[:200]}'}
+
+            project_id = r.json().get('id')
+
+            # Deploy
+            deploy_body = {
+                'name': repo, 'project': project_id,
+                'gitSource': {
+                    'type': 'github', 'ref': branch,
+                    'org': owner, 'repoId': int(repo_id),
+                },
+                'target': 'production',
+            }
+            r = requests.post(
+                'https://api.vercel.com/v13/deployments',
+                headers={'Authorization': f'Bearer {self.vercel_token}', 'Content-Type': 'application/json'},
+                json=deploy_body, timeout=20,
+            )
+            if r.status_code not in (200, 201):
+                return {'success': False, 'error': f'Deploy: {r.text[:200]}'}
+
+            deploy_id = r.json().get('id')
+            url = self._poll_vercel(deploy_id, project_name, log)
+
+            return {
+                'success': True, 'provider': 'vercel',
+                'url': url, 'primary_url': url,
+                'frontend_url': url,
+                'frontend_ready': True, 'backend_ready': False,
+            }
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+    def _poll_vercel(self, deploy_id, project_name, log, timeout=180):
+        start = time.time()
+        while time.time() - start < timeout:
+            r = requests.get(
+                f'https://api.vercel.com/v13/deployments/{deploy_id}',
+                headers={'Authorization': f'Bearer {self.vercel_token}'}, timeout=15,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                state = data.get('readyState') or data.get('status')
+                if state == 'READY':
+                    url = data.get('url', f'{project_name}.vercel.app')
+                    return url if url.startswith('http') else f'https://{url}'
+            time.sleep(5)
+        return f'https://{project_name}.vercel.app'
+
+    # ============================================
+    # Netlify
+    # ============================================
+    def _deploy_netlify(self, owner, repo, branch, detection, log):
+        if not self.netlify_token:
+            return {'success': False, 'error': 'NETLIFY_TOKEN not set'}
+
+        log("   📦 Creating Netlify site...")
+        project_name = re.sub(r'[^a-z0-9\-]', '-', repo.lower())[:50]
+
+        try:
+            r = requests.post(
+                'https://api.netlify.com/api/v1/sites',
+                headers={'Authorization': f'Bearer {self.netlify_token}'},
+                json={
+                    'name': project_name,
+                    'repo': {
+                        'provider': 'github',
+                        'repo': f'{owner}/{repo}',
+                        'branch': branch,
+                        'cmd': 'npm run build',
+                        'dir': 'dist',
+                    },
+                },
+                timeout=20,
+            )
+            if r.status_code not in (200, 201):
+                return {'success': False, 'error': f'Netlify: {r.text[:200]}'}
+
+            data = r.json()
+            url = data.get('ssl_url') or data.get('url') or f'https://{project_name}.netlify.app'
+
+            return {
+                'success': True, 'provider': 'netlify',
+                'url': url, 'primary_url': url,
+                'frontend_url': url,
+                'frontend_ready': True, 'backend_ready': False,
+            }
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+    # ============================================
+    # Render
+    # ============================================
+    def _deploy_render(self, owner, repo, branch, detection, log):
+        if not self.render_api_key:
+            return {'success': False, 'error': 'RENDER_API_KEY not set'}
+
+        log("   📦 Creating Render service...")
+        project_name = re.sub(r'[^a-z0-9\-]', '-', repo.lower())[:50]
+        lang = detection.get('backend_lang', 'python')
+
+        try:
+            body = {
+                'type': 'web_service',
+                'name': f'{project_name}-backend',
+                'ownerId': self.render_owner_id,
+                'repo': f'https://github.com/{owner}/{repo}',
+                'branch': branch,
+                'autoDeploy': 'yes',
+                'serviceDetails': {
+                    'env': 'python' if lang == 'python' else 'node',
+                    'plan': 'free',
+                    'region': 'oregon',
+                },
+            }
+            r = requests.post(
+                'https://api.render.com/v1/services',
+                headers={'Authorization': f'Bearer {self.render_api_key}', 'Content-Type': 'application/json'},
+                json=body, timeout=30,
+            )
+            if r.status_code not in (200, 201):
+                return {'success': False, 'error': f'Render: {r.text[:200]}'}
+
+            data = r.json()
+            service = data.get('service', data)
+            service_id = service.get('id')
+
+            url = self._poll_render(service_id, project_name, log)
+
+            return {
+                'success': True, 'provider': 'render',
+                'url': url, 'primary_url': url,
+                'backend_url': url,
+                'frontend_ready': False, 'backend_ready': True,
+            }
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+    def _poll_render(self, service_id, project_name, log, timeout=300):
+        start = time.time()
+        while time.time() - start < timeout:
+            r = requests.get(
+                f'https://api.render.com/v1/services/{service_id}',
+                headers={'Authorization': f'Bearer {self.render_api_key}'}, timeout=15,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                service = data.get('service', data)
+                url = service.get('serviceDetails', {}).get('url')
+                if url:
+                    return url if url.startswith('http') else f'https://{url}'
+            time.sleep(10)
+        return f'https://{project_name}-backend.onrender.com'

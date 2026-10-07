@@ -36,3 +36,49 @@ uploads/*
 # IDE
 .vscode/
 .idea/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+
+# Node
+node_modules/
+build/
+dist/
+.cache/
+
+# Environment
+.env
+.env.local
+.env.production
+.env.development
+
+# Deployment (LOCAL ONLY)
+deployments/
+ml_storage/
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary
+*.tmp
+*.bak
+.corrupt
+
+# Old deployments
+deployments_OLD_*/
+deployments_OLD_20260929/
+**/repo/
