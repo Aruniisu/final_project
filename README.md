@@ -2,7 +2,7 @@
 
 > Autonomous Software Delivery & Infrastructure Management through Multi-Agent AI
 
-**Built with:** Python 3.11 · Flask · React 19 · MongoDB · Groq API · scikit-learn
+**Built with:** Python · Flask · React · MongoDB · Groq API · scikit-learn
 
 ---
 
@@ -49,12 +49,12 @@ An autonomous DevOps platform powered by **10 AI agents** that deploy applicatio
 
 ## 🏗️ System Architecture
 
-FRONTEND (React 19)
+FRONTEND (React)
   6 Dashboards · Socket.IO Real-time · Tailwind CSS
         │
         │ WebSocket / REST
         ▼
-BACKEND (Flask + Python 3.11)
+BACKEND (Flask + Python)
   Orchestrator (LLM-Based Routing — Groq API)
   ├─ DeployAgent      ├─ SecurityAgent
   ├─ PipelineAgent    ├─ CodeFixerAgent
@@ -75,8 +75,8 @@ DEPLOYMENT (SelfHostService)
 | Category | Technologies |
 |----------|-------------|
 | **AI/ML** | Python, Groq API (gpt-oss-120b), scikit-learn, Multi-Agent Systems |
-| **Backend** | Flask 2.3.3, Flask-SocketIO, Socket.IO, REST APIs |
-| **Frontend** | React 19, Tailwind CSS, DaisyUI, Framer Motion, Chart.js |
+| **Backend** | Flask, Flask-SocketIO, Socket.IO, REST APIs |
+| **Frontend** | React, Tailwind CSS, DaisyUI, Framer Motion, Chart.js |
 | **Database** | MongoDB (Flask-PyMongo) |
 | **DevOps** | GitHub Actions, CI/CD, Cloudflare Tunnel, Docker |
 | **Tools** | Git, VS Code, Postman, reportlab |
